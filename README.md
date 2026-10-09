@@ -19,4 +19,4 @@ streamlit run app.py
 
 ## Status
 
-Phase 0 (setup) is done. `engine/sec_client.py` sends a User-Agent with your name and email, rate-limits requests to about 9 per second (the SEC allows 10), retries on 429/5xx, and caches every response under `data/cache/`.
+Phase 0 (setup) is done. Phase 1 (data layer) code and fixture tests are written: `engine/tickers.py` and `engine/xbrl.py`. They have not yet been checked against live SEC data (`RUN_LIVE=1 pytest -m live`). To see what is extracted for a ticker, run `python scripts/inspect_ticker.py AAPL`.
