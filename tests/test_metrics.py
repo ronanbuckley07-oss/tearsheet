@@ -205,3 +205,30 @@ def test_net_cash_leverage_is_meaningful_but_negative_ebitda_is_not():
 def test_growth_from_negative_base_nm():
     g = metrics.growth("g", fig(10), fig(-5), "")
     assert g.value is None and g.nm
+
+
+# ---- dropped tags: reported after the 10-K, missing now -> n/a, not 0 -------------
+
+
+def test_debt_tag_dropped_after_10k_is_na_not_zero():
+    # CoreWeave pattern: LTD tagged in the Q1 10-Q, company-specific tags in Q2.
+    m = metrics.compute(company(overrides={
+        "LongTermDebtCurrent": [row(20, "2025-12-31"), row(25, "2026-03-31", form="10-Q")],
+        "LongTermDebtNoncurrent": [row(280, "2025-12-31"), row(300, "2026-03-31", form="10-Q")],
+        "LongTermDebt": [row(300, "2025-12-31")],
+    }), date(2026, 6, 30), PRICE)
+    d = m["total_debt"]
+    assert d.value is None and "company-specific tags" in d.reason
+    assert m["enterprise_value"].value is None
+
+
+def test_item_never_reported_still_zero():
+    m = metrics.compute(company(), END, PRICE)
+    assert m["preferred_stock"].value == 0
+
+
+def test_optional_item_dropped_after_10k_is_na():
+    m = metrics.compute(company(overrides={
+        "MinorityInterest": [row(25, "2025-12-31"), row(30, "2026-03-31", form="10-Q")],
+    }), date(2026, 6, 30), PRICE)
+    assert m["noncontrolling_interest"].value is None

@@ -379,3 +379,36 @@ def test_cover_shares_fallback_no_filing_noted():
     series = extract_metric(facts({}), "shares_outstanding_cover")
     fill_cover_shares_from_filing(series, 1, _meta([]), TextClient(INSTANCE))
     assert not series and any("no inline-XBRL" in n for n in series.notes)
+
+
+def test_debt_securities_current_is_short_term_investments():
+    s = extract_metric(facts({"DebtSecuritiesCurrent": [row(34_143, "2026-07-26", form="10-Q")]}),
+                       "short_term_investments")
+    assert s.latest().value == 34_143
+
+
+COMPANY_DEBT = """<?xml version="1.0" encoding="utf-8"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance" xmlns:crwv="http://www.coreweave.com/20260630"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2026" xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+  <context id="i"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier></entity>
+    <period><instant>2026-06-30</instant></period></context>
+  <context id="old"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier></entity>
+    <period><instant>2025-12-31</instant></period></context>
+  <context id="dim"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier><segment>
+    <xbrldi:explicitMember dimension="us-gaap:DebtInstrumentAxis">crwv:NotesMember</xbrldi:explicitMember>
+    </segment></entity><period><instant>2026-06-30</instant></period></context>
+  <crwv:RecourseDebtCurrent contextRef="i" unitRef="usd">6235000000</crwv:RecourseDebtCurrent>
+  <crwv:RecourseDebtNonCurrent contextRef="i" unitRef="usd">25170000000</crwv:RecourseDebtNonCurrent>
+  <crwv:RecourseDebtNonCurrent contextRef="old" unitRef="usd">14608000000</crwv:RecourseDebtNonCurrent>
+  <crwv:RecourseDebtNonCurrent contextRef="dim" unitRef="usd">2000000000</crwv:RecourseDebtNonCurrent>
+  <crwv:LongTermDebtMaturityAfterYearFour contextRef="i" unitRef="usd">9000000000</crwv:LongTermDebtMaturityAfterYearFour>
+  <us-gaap:LongTermDebtCurrent contextRef="i" unitRef="usd">1</us-gaap:LongTermDebtCurrent>
+</xbrl>"""
+
+
+def test_parse_company_debt_keeps_plain_custom_debt_at_date():
+    from engine.xbrl import parse_company_debt
+    assert parse_company_debt(COMPANY_DEBT, date(2026, 6, 30)) == [
+        ("crwv:RecourseDebtCurrent", 6_235e6),
+        ("crwv:RecourseDebtNonCurrent", 25_170e6),
+    ]

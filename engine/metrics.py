@@ -108,8 +108,42 @@ def _optional_balance(series: MetricSeries, end: date, fy_end: date | None) -> F
     f = periods.balance_at(series, end, fy_end)
     if f.ok:
         return f
+    dropped = _dropped([series], end, fy_end, series.metric)
+    if dropped is not None:
+        return dropped
     return Figure(name=series.metric, value=0.0, unit="USD", formula="not reported -> 0",
                   as_of=end, notes=(f"{series.metric}: {f.reason}; treated as 0 (FD-10 Q4)",))
+
+
+def _dropped(group: list[MetricSeries], end: date, fy_end: date | None, name: str,
+             hint: str = "") -> Figure | None:
+    """n/a when an item was reported (non-zero) after the latest 10-K but not at ``end``.
+
+    That pattern means the company stopped using the standard tag, not that the
+    item went away (CoreWeave moved its debt to company-specific tags in its
+    June 2026 10-Q). Treating it as 0 would silently drop a real liability
+    (CLAUDE.md rule 3), so FD-10 Q4's "treat as 0" doesn't apply.
+    """
+    recent = [
+        f for s in group for f in s.facts
+        if f.start is None and f.end < end and (fy_end is None or f.end > fy_end) and f.value
+    ]
+    if not recent:
+        return None
+    last = max(recent, key=lambda f: f.end)
+    return missing(
+        name, "USD",
+        f"{last.metric} was {last.value / 1e6:,.0f}m at {last.end} but isn't reported at {end}; "
+        f"the latest filing likely uses company-specific tags{hint}",
+        as_of=end,
+    )
+
+
+def _company_debt_hint(series: dict[str, MetricSeries]) -> str:
+    cs = series.get("debt_company_specific")
+    if not cs or not cs.facts:
+        return ""
+    return " (" + ", ".join(f"{f.tag} {f.value / 1e6:,.0f}m" for f in cs.facts) + ")"
 
 
 def total_debt(series: dict[str, MetricSeries], end: date, fy_end: date | None) -> Figure:
@@ -137,7 +171,10 @@ def total_debt(series: dict[str, MetricSeries], end: date, fy_end: date | None) 
                     f"LongTermDebt tag ({ltd_total.value:,.0f}) differs from current + noncurrent "
                     f"({ltd.value:,.0f}) by {diff:+.1%}; the balance sheet lines are used"
                 )
-    elif ltd_total.ok:
+    elif ltd_total.ok and (ltd_total.as_of == end or not _dropped(
+            [series["debt_long_term_current"], series["debt_long_term_noncurrent"]], end, fy_end, "x")):
+        # A 10-K-date LongTermDebt (FD-10 Q3) is only used if the split wasn't
+        # reported after it; otherwise it would be a stale stand-in.
         ltd = _renamed(ltd_total, "long_term_debt")
         notes.append("Long-term debt from the LongTermDebt total (current/noncurrent split not reported)")
     elif noncur.ok or cur.ok:
@@ -146,8 +183,11 @@ def total_debt(series: dict[str, MetricSeries], end: date, fy_end: date | None) 
         ltd = _renamed(have, "long_term_debt")
         notes.append(f"Only {have.name} reported at {end}; the other part treated as 0 (FD-10 Q4)")
     else:
-        ltd = Figure(name="long_term_debt", value=0.0, unit="USD", formula="not reported -> 0", as_of=end,
-                     notes=(f"No long-term debt reported at {end}; treated as 0 (FD-10 Q4)",))
+        ltd = _dropped(
+            [series[m] for m in ("debt_long_term_current", "debt_long_term_noncurrent", "debt_long_term_total")],
+            end, fy_end, "long_term_debt", _company_debt_hint(series),
+        ) or Figure(name="long_term_debt", value=0.0, unit="USD", formula="not reported -> 0", as_of=end,
+                    notes=(f"No long-term debt reported at {end}; treated as 0 (FD-10 Q4)",))
 
     stb = _optional_balance(series["debt_short_term_borrowings"], end, fy_end)
     cp = _optional_balance(series["debt_commercial_paper"], end, fy_end)
@@ -165,7 +205,10 @@ def total_debt(series: dict[str, MetricSeries], end: date, fy_end: date | None) 
         fl = _renamed(have, "finance_leases")
         notes.append(f"Only {have.name} reported; the other part treated as 0 (FD-10 Q4)")
     else:
-        fl = Figure(name="finance_leases", value=0.0, unit="USD", formula="not reported -> 0", as_of=end,
+        fl = _dropped(
+            [series[m] for m in ("finance_lease_current", "finance_lease_noncurrent", "finance_lease_total")],
+            end, fy_end, "finance_leases",
+        ) or Figure(name="finance_leases", value=0.0, unit="USD", formula="not reported -> 0", as_of=end,
                     notes=(f"No finance lease liability reported at or before {end}; treated as 0 (FD-10 Q4)",))
 
     return combine(

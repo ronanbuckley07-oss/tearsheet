@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
+import re
 import xml.etree.ElementTree as ET
 
 from engine.sec_client import SECClient, SECError
@@ -198,6 +199,7 @@ METRICS: dict[str, MetricDef] = {
                 "ShortTermInvestments",
                 "MarketableSecuritiesCurrent",
                 "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+                "DebtSecuritiesCurrent",  # NVIDIA from FY2027 ("Marketable debt securities")
             ),
             instant=True,
         ),
@@ -241,7 +243,77 @@ def get_series(
     if not series["shares_outstanding_cover"]:
         meta = meta or get_metadata(cik, client)
         fill_cover_shares_from_filing(series["shares_outstanding_cover"], cik, meta, client)
+    meta = meta or get_metadata(cik, client)
+    filing = meta.latest("10-K", "10-Q")
+    if filing and filing.report_date and not any(
+        series[m].get(None, filing.report_date)
+        for m in ("debt_long_term_current", "debt_long_term_noncurrent", "debt_long_term_total")
+    ):
+        series["debt_company_specific"] = company_specific_debt(cik, filing, client)
     return series
+
+
+# ---- company-specific debt tags (information only) ----------------------------
+#
+# Some filers put their debt under their own tags (CoreWeave: crwv:RecourseDebtCurrent,
+# ...), which companyfacts doesn't carry. These are listed so a missing debt figure
+# can say what the company reports instead. They are NOT added to total debt:
+# which of them to sum is a judgment the owner hasn't made yet.
+
+_DEBT_WORDS = re.compile(r"(Debt|Borrowing|NotesPayable|LoansPayable|CreditFacilit)")
+_NOT_BALANCE = re.compile(
+    r"(Maturit|Interest|Discount|Issuance|FairValue|Repay|Proceeds|Payment|Covenant|Expense|"
+    r"Securities|Extinguish|Conversion|Converted|Rate|Term(?!Debt)|Gain|Loss|TextBlock|Policy|Table)"
+)
+
+
+def company_specific_debt(cik: int | str, filing: Filing, client: SECClient) -> MetricSeries:
+    series = MetricSeries(metric="debt_company_specific")
+    url = instance_url(cik, filing)
+    if url is None:
+        return series
+    try:
+        found = parse_company_debt(client.get_text(url), filing.report_date)
+    except (SECError, ET.ParseError):
+        return series
+    for tag, value in found:
+        series.facts.append(Fact(
+            metric="debt_company_specific", value=value, unit="USD", start=None, end=filing.report_date,
+            period_type=PeriodType.INSTANT,
+            sources=(Source(taxonomy=tag.split(":")[0], tag=tag, form=filing.form, accession=filing.accession,
+                            filed=filing.filing_date, start=None, end=filing.report_date, fy=None, fp=None),),
+        ))
+    return series
+
+
+def parse_company_debt(xml_text: str, end: date) -> list[tuple[str, float]]:
+    """Non-dimensional USD facts at ``end`` in the company's own namespace that look like debt."""
+    root = ET.fromstring(xml_text)
+    plain_at_end = set()
+    for ctx in root.iter(f"{_XBRLI}context"):
+        instant = ctx.find(f"{_XBRLI}period/{_XBRLI}instant")
+        has_dims = any(m.tag.endswith("explicitMember") or m.tag.endswith("typedMember") for m in ctx.iter())
+        if instant is not None and instant.text and _d(instant.text.strip()) == end and not has_dims:
+            plain_at_end.add(ctx.get("id"))
+    prefixes = {uri: p for p, uri in _namespaces(xml_text).items()}
+    out = []
+    for el in root:
+        ns, _, local = el.tag.rpartition("}")
+        ns = ns.lstrip("{")
+        if any(std in ns for std in ("fasb.org", "xbrl.sec.gov", "xbrl.org")):
+            continue
+        if el.get("contextRef") not in plain_at_end or not el.text:
+            continue
+        if _DEBT_WORDS.search(local) and not _NOT_BALANCE.search(local):
+            try:
+                out.append((f"{prefixes.get(ns, 'custom')}:{local}", float(el.text.strip())))
+            except ValueError:
+                continue
+    return sorted(set(out))
+
+
+def _namespaces(xml_text: str) -> dict[str, str]:
+    return dict(re.findall(r'xmlns:([\w-]+)="([^"]+)"', xml_text[:20000]))
 
 
 # ---- extraction ---------------------------------------------------------------

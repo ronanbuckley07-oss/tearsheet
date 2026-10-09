@@ -88,6 +88,11 @@ How to fill it in: dollar amounts and shares in millions (commas are fine), peri
 
 | Ticker | Period end | LTM revenue | LTM EBITDA | Total debt | Cash + ST inv. | Diluted shares |
 |---|---|---|---|---|---|---|
-|  |  |  |  |  |  |  |
-|  |  |  |  |  |  |  |
-|  |  |  |  |  |  |  |
+| NVDA | 2026-07-26 | 302,970 | 201,266 | 33,366 | 56,586 | 24,285 |
+| CRWV | 2026-06-30 | 7,590 | 3,760 | 35,289 | 5,539 | 551 |
+| AVGO | 2026-08-02 | 89,104 | 51,578 | 59,419 | 23,975 | 4,887 |
+
+Filled 2026-10-09 at the owner's request by Claude, read from the rendered financial statements in each filing (not from companyfacts). The owner should spot-check them against the filings. TSMC was the owner's third pick but files 20-F (out of v1 scope), so Broadcom replaced it. Working:
+- NVDA (10-K 0001045810-26-000021, 10-Q 0001045810-26-000075). Revenue 215,938 + 177,837 - 90,805. EBIT 130,387 + 117,270 - 50,078; D&A (cash flow) 2,843 + 2,124 - 1,280. Debt: short-term 1,000 + long-term 32,366 (no finance leases on the face). Cash 22,443 + marketable debt securities 34,143; marketable equity securities (42,783) excluded, see FD-10 Q10. Diluted shares Q2 FY2027.
+- CRWV (10-K 0001769628-26-000104, 10-Q 0001769628-26-000366). Revenue 5,131 + 4,653 - 2,194. EBIT -46 + (-193) - (-8); D&A 2,454 + 2,540 - 1,003. Debt: recourse 6,235 + 25,170, non-recourse 1,278 + 2,385, finance leases 7 + 214. Cash 5,524 + marketable securities 15 (restricted cash excluded, FD-2). Diluted shares Q2 2026.
+- AVGO (10-K 0001730168-25-000121, 10-Q 0001730168-26-000080). Revenue 63,887 + 71,089 - 45,872. EBIT 25,484 + 35,306 - 17,976; D&A from the cash flow lines "amortization of intangible and right-of-use assets" + "depreciation": 8,775 + 6,531 - 6,542. Debt: short-term 2,252 + long-term 57,167. Cash 23,975 (no short-term investments). Diluted shares Q3 FY2026 (EPS note).
