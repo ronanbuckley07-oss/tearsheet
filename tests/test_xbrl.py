@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+from engine.tickers import CompanyMetadata, Filing
 from engine.xbrl import (
     METRICS,
     MetricDef,
@@ -9,6 +10,9 @@ from engine.xbrl import (
     classify_period,
     extract_all,
     extract_metric,
+    fill_cover_shares_from_filing,
+    instance_url,
+    parse_cover_shares,
 )
 
 
@@ -283,4 +287,86 @@ def test_extract_all_returns_every_metric():
 
 def test_debt_components_kept_separate():
     names = [m for m in METRICS if m.startswith("debt_") or m.startswith("finance_lease")]
-    assert len(names) == 7  # totalled in Phase 2 under FD-2, not here
+    assert len(names) == 8  # totalled in Phase 2 under FD-2, not here
+
+
+def test_finance_lease_total_extracted():
+    s = extract_metric(facts({"FinanceLeaseLiability": [row(66_594e6, "2026-06-30")]}), "finance_lease_total")
+    assert s.latest().value == 66_594e6
+
+
+# ---- cover-page shares from the XBRL instance (multi-class filers) --------------
+
+INSTANCE = """<?xml version="1.0" encoding="utf-8"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance" xmlns:dei="http://xbrl.sec.gov/dei/2026"
+      xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+  <context id="c-1"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier></entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-06-30</endDate></period></context>
+  <context id="a"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier><segment>
+    <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassAMember</xbrldi:explicitMember>
+    </segment></entity><period><instant>2026-07-17</instant></period></context>
+  <context id="b"><entity><identifier scheme="http://www.sec.gov/CIK">1</identifier><segment>
+    <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassBMember</xbrldi:explicitMember>
+    </segment></entity><period><instant>2026-07-17</instant></period></context>
+  <dei:DocumentType contextRef="c-1">10-Q</dei:DocumentType>
+  <dei:EntityCommonStockSharesOutstanding contextRef="a" unitRef="shares">5868000000</dei:EntityCommonStockSharesOutstanding>
+  <dei:EntityCommonStockSharesOutstanding contextRef="b" unitRef="shares">835000000</dei:EntityCommonStockSharesOutstanding>
+</xbrl>"""
+
+FILING = Filing(form="10-Q", accession="0000000001-26-000071", filing_date=date(2026, 7, 23),
+                report_date=date(2026, 6, 30), primary_document="x-20260630.htm")
+
+
+def _meta(filings):
+    return CompanyMetadata(cik=1, name="Test", tickers=[], exchanges=[], sic=None, sic_description=None,
+                           fiscal_year_end="1231", state_of_incorporation=None, filings=filings)
+
+
+class TextClient:
+    def __init__(self, text):
+        self.text, self.urls = text, []
+
+    def get_text(self, url):
+        self.urls.append(url)
+        return self.text
+
+
+def test_instance_url():
+    assert instance_url(1, FILING) == (
+        "https://www.sec.gov/Archives/edgar/data/1/000000000126000071/x-20260630_htm.xml"
+    )
+
+
+def test_parse_cover_shares_reads_each_class():
+    got = parse_cover_shares(INSTANCE)
+    assert sorted(got) == [
+        ("us-gaap:CommonClassAMember", 5_868e6, date(2026, 7, 17)),
+        ("us-gaap:CommonClassBMember", 835e6, date(2026, 7, 17)),
+    ]
+
+
+def test_cover_shares_fallback_sums_classes_with_sources():
+    series = extract_metric(facts({}), "shares_outstanding_cover")
+    assert not series
+    client = TextClient(INSTANCE)
+    fill_cover_shares_from_filing(series, 1, _meta([FILING]), client)
+    f = series.latest()
+    assert f.value == 6_703e6 and f.end == date(2026, 7, 17)
+    assert len(f.sources) == 2 and f.source.accession == FILING.accession
+    assert "Sum of 2 share classes" in f.note and "CommonClassAMember 5,868,000,000" in f.note
+    assert not any(n.startswith("No shares values found") for n in series.notes)
+
+
+def test_cover_shares_fallback_different_dates_not_summed():
+    series = extract_metric(facts({}), "shares_outstanding_cover")
+    text = INSTANCE.replace('<instant>2026-07-17</instant></period></context>\n  <dei:Doc',
+                            '<instant>2026-07-18</instant></period></context>\n  <dei:Doc')
+    assert text != INSTANCE
+    fill_cover_shares_from_filing(series, 1, _meta([FILING]), TextClient(text))
+    assert not series and any("different as-of dates" in n for n in series.notes)
+
+
+def test_cover_shares_fallback_no_filing_noted():
+    series = extract_metric(facts({}), "shares_outstanding_cover")
+    fill_cover_shares_from_filing(series, 1, _meta([]), TextClient(INSTANCE))
+    assert not series and any("no inline-XBRL" in n for n in series.notes)

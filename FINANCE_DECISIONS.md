@@ -102,4 +102,6 @@ FD-10. Open questions log
 
 When Claude Code hits a judgment call not covered above, it logs it here and asks you. Record the answer.
 
--
+- Q1 (2026-10-09, Phase 1, FD-1). D&A when the cash flow statement shows depreciation only. Alphabet's FY2025 cash flow reports "Depreciation of property and equipment" ($21,136M, us-gaap:Depreciation); intangible amortization (~$0.5B) is folded into "other" and has no annual tag, so the Depreciation + AmortizationOfIntangibleAssets fallback finds no FY2025 D&A. Suggested: use depreciation alone in that case, with a note that amortization isn't reported separately. Decision: pending.
+- Q2 (2026-10-09, Phase 1, FD-1). Microsoft's cash flow line is "Depreciation, amortization, and other" ($38,534M for FY2026), a company-specific tag (msft:DepreciationAmortizationAndOther) that companyfacts doesn't carry. The engine currently uses Depreciation ($34,300M, rounded in the notes) + AmortizationOfIntangibleAssets ($4,700M) = $39,000M. Suggested: keep the standard-tag sum (it is pure D&A and checkable), and show the cash-flow line beside it later. Decision: pending.
+- Q3 (2026-10-09, Phase 1, FD-2). Balance sheet items reported only annually. Apple tags finance lease liabilities ($538M current + $692M noncurrent) in the 10-K only, not in 10-Qs, so at a June 2026 LTM date the latest value is September 2025. Suggested: use the latest 10-K value, flagged as from an earlier date. Decision: pending.

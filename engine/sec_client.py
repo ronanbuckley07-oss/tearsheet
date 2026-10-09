@@ -10,7 +10,8 @@ Three jobs, all required by the SEC's fair-access policy or by CLAUDE.md:
    body is stored next to a small metadata file recording the URL and when it
    was fetched, so any figure can later say how fresh its source data was.
 
-This module knows nothing about finance. It returns parsed JSON.
+This module knows nothing about finance. It returns parsed JSON, or raw text
+for the few non-JSON documents we read (a filing's XBRL instance).
 """
 
 from __future__ import annotations
@@ -120,21 +121,25 @@ class SECClient:
         """Return parsed JSON for ``url``, from disk cache when fresh."""
         return self.fetch(url, refresh=refresh).data
 
-    def fetch(self, url: str, refresh: bool = False) -> CachedResponse:
+    def get_text(self, url: str, refresh: bool = False) -> str:
+        """Return the body of ``url`` as text (for XML documents), cached like JSON."""
+        return self.fetch(url, refresh=refresh, as_text=True).data
+
+    def fetch(self, url: str, refresh: bool = False, as_text: bool = False) -> CachedResponse:
         body_path, meta_path = self._cache_paths(url)
         if not refresh:
             cached = self._read_cache(url, body_path, meta_path)
             if cached is not None:
                 return cached
 
-        data = self._download(url)
+        data = self._download(url, as_text=as_text)
         fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._write_cache(body_path, meta_path, url, fetched_at, data)
         return CachedResponse(url=url, fetched_at=fetched_at, from_cache=False, data=data)
 
     # ---- network ------------------------------------------------------------
 
-    def _download(self, url: str) -> Any:
+    def _download(self, url: str, as_text: bool = False) -> Any:
         headers = {"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"}
         last_error: str = ""
         for attempt in range(self.max_retries + 1):
@@ -145,6 +150,8 @@ class SECClient:
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
                 if resp.status_code == 200:
+                    if as_text:
+                        return resp.text
                     try:
                         return resp.json()
                     except ValueError as exc:

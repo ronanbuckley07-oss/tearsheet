@@ -18,8 +18,9 @@ UA = "Test User test@example.com"
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, bad_json=False):
+    def __init__(self, status_code=200, payload=None, bad_json=False, text=None):
         self.status_code = status_code
+        self.text = text
         self._payload = payload
         self._bad_json = bad_json
 
@@ -259,6 +260,14 @@ def test_rate_limiter_no_sleep_when_already_spaced():
 def test_rate_limiter_rejects_interval_over_sec_cap():
     with pytest.raises(ValueError):
         RateLimiter(min_interval=0.05)
+
+
+def test_get_text_returns_body_and_caches(tmp_path):
+    xml_url = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/x-20260630_htm.xml"
+    client, session = make_client(tmp_path, [FakeResponse(text="<xbrl/>")])
+    assert client.get_text(xml_url) == "<xbrl/>"
+    assert client.get_text(xml_url) == "<xbrl/>"
+    assert len(session.calls) == 1
 
 
 # ---- live (opt-in) ------------------------------------------------------------

@@ -30,8 +30,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
-from engine.sec_client import SECClient
-from engine.tickers import cik10
+import xml.etree.ElementTree as ET
+
+from engine.sec_client import SECClient, SECError
+from engine.tickers import CompanyMetadata, Filing, cik10, get_metadata
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 
@@ -202,6 +204,9 @@ METRICS: dict[str, MetricDef] = {
         MetricDef("debt_commercial_paper", ("CommercialPaper",), instant=True),
         MetricDef("finance_lease_current", ("FinanceLeaseLiabilityCurrent",), instant=True),
         MetricDef("finance_lease_noncurrent", ("FinanceLeaseLiabilityNoncurrent",), instant=True),
+        # Some filers (e.g. MSFT) tag only the total, not the current/noncurrent
+        # split. Kept separate so Phase 2 can avoid adding it on top of the split.
+        MetricDef("finance_lease_total", ("FinanceLeaseLiability",), instant=True),
         MetricDef("noncontrolling_interest", ("MinorityInterest",), instant=True),
         MetricDef("preferred_stock", ("PreferredStockValue",), instant=True),
         # Cover page (dei). Reported per share class for multi-class companies.
@@ -222,6 +227,17 @@ METRICS: dict[str, MetricDef] = {
 
 def get_company_facts(cik: int | str, client: SECClient) -> dict:
     return client.get_json(COMPANYFACTS_URL.format(cik10=cik10(cik)))
+
+
+def get_series(
+    cik: int | str, client: SECClient, meta: CompanyMetadata | None = None
+) -> dict[str, MetricSeries]:
+    """All metrics for a company, with the cover-share fallback applied."""
+    series = extract_all(get_company_facts(cik, client))
+    if not series["shares_outstanding_cover"]:
+        meta = meta or get_metadata(cik, client)
+        fill_cover_shares_from_filing(series["shares_outstanding_cover"], cik, meta, client)
+    return series
 
 
 # ---- extraction ---------------------------------------------------------------
@@ -372,3 +388,111 @@ def _source(mdef: MetricDef, tag: str, r: dict) -> Source:
 
 def _d(s: str | None) -> date | None:
     return date.fromisoformat(s) if s else None
+
+
+# ---- cover-page shares from the filing itself -------------------------------
+#
+# companyfacts drops any fact that carries a dimension. Companies with several
+# share classes (e.g. Alphabet: Class A, B, C) tag their cover-page share count
+# per class, so companyfacts has no EntityCommonStockSharesOutstanding for them
+# at all. For those, read the per-class counts straight from the latest 10-K or
+# 10-Q's XBRL instance and sum them (FD-3: cover-page shares summed across
+# share classes).
+
+_XBRLI = "{http://www.xbrl.org/2003/instance}"
+_COVER_SHARES = "EntityCommonStockSharesOutstanding"
+
+
+def instance_url(cik: int | str, filing: Filing) -> str | None:
+    """URL of the XBRL instance SEC extracts from an inline-XBRL filing."""
+    doc = filing.primary_document
+    if not doc.endswith(".htm"):
+        return None
+    return (
+        f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+        f"{filing.accession.replace('-', '')}/{doc[:-4]}_htm.xml"
+    )
+
+
+def parse_cover_shares(xml_text: str) -> list[tuple[str | None, float, date]]:
+    """(share class member or None, shares, as-of date) for each cover-page fact."""
+    root = ET.fromstring(xml_text)
+    contexts: dict[str, tuple[str | None, date | None]] = {}
+    for ctx in root.iter(f"{_XBRLI}context"):
+        instant = ctx.find(f"{_XBRLI}period/{_XBRLI}instant")
+        members = [m.text.strip() for m in ctx.iter() if m.tag.endswith("explicitMember") and m.text]
+        contexts[ctx.get("id")] = (
+            "+".join(members) or None,
+            _d(instant.text.strip()) if instant is not None and instant.text else None,
+        )
+    out = []
+    for el in root:
+        ns, _, local = el.tag.rpartition("}")
+        if local != _COVER_SHARES or "xbrl.sec.gov/dei" not in ns or not el.text:
+            continue
+        member, as_of = contexts.get(el.get("contextRef"), (None, None))
+        if as_of is not None:
+            out.append((member, float(el.text.strip()), as_of))
+    return out
+
+
+def fill_cover_shares_from_filing(
+    series: MetricSeries, cik: int | str, meta: CompanyMetadata, client: SECClient
+) -> None:
+    filing = meta.latest("10-K", "10-Q")
+    url = instance_url(cik, filing) if filing else None
+    if url is None:
+        series.notes.append("Cover-page shares not in companyfacts and no inline-XBRL 10-K/10-Q to read them from")
+        return
+    try:
+        facts = parse_cover_shares(client.get_text(url))
+    except (SECError, ET.ParseError) as exc:
+        series.notes.append(f"Cover-page shares not in companyfacts; reading {url} failed: {exc}")
+        return
+    if not facts:
+        series.notes.append(f"Cover-page shares not in companyfacts or in {url}")
+        return
+
+    # Exact duplicates (same class, same value) count once.
+    distinct = {(m, v, d) for m, v, d in facts}
+    dates = {d for _, _, d in distinct}
+    if len(dates) > 1:
+        series.notes.append(
+            f"Cover-page share classes in {filing.accession} have different as-of dates "
+            f"({', '.join(sorted(map(str, dates)))}); not summed"
+        )
+        return
+    as_of = dates.pop()
+    parts = sorted(distinct, key=lambda x: x[0] or "")
+    sources = tuple(
+        Source(
+            taxonomy="dei",
+            tag=_COVER_SHARES,
+            form=filing.form,
+            accession=filing.accession,
+            filed=filing.filing_date,
+            start=None,
+            end=as_of,
+            fy=None,
+            fp=None,
+        )
+        for _ in parts
+    )
+    label = ", ".join(f"{(m or 'all').split(':')[-1]} {v:,.0f}" for m, v, _ in parts)
+    series.facts = [
+        Fact(
+            metric=series.metric,
+            value=sum(v for _, v, _ in parts),
+            unit="shares",
+            start=None,
+            end=as_of,
+            period_type=PeriodType.INSTANT,
+            sources=sources[:1] if len(parts) == 1 else sources,
+            note=(
+                f"Sum of {len(parts)} share classes: {label} "
+                if len(parts) > 1 else f"{label} "
+            ) + "(read from the filing's XBRL instance; companyfacts omits per-class cover facts)",
+        )
+    ]
+    series.notes = [n for n in series.notes if not n.startswith("No shares values found")]
+    series.notes.append("Cover-page shares taken from the latest filing's XBRL instance (only that filing)")
