@@ -232,3 +232,36 @@ def test_optional_item_dropped_after_10k_is_na():
         "MinorityInterest": [row(25, "2025-12-31"), row(30, "2026-03-31", form="10-Q")],
     }), date(2026, 6, 30), PRICE)
     assert m["noncontrolling_interest"].value is None
+
+
+def _with_company_debt(m_series, tags):
+    from engine.xbrl import Fact, MetricSeries, PeriodType, Source
+    cs = MetricSeries(metric="debt_company_specific")
+    for tag, v in tags:
+        cs.facts.append(Fact(metric="debt_company_specific", value=v, unit="USD", start=None,
+                             end=date(2026, 6, 30), period_type=PeriodType.INSTANT,
+                             sources=(Source("crwv", tag, "10-Q", "X-26-1", date(2026, 8, 12), None,
+                                             date(2026, 6, 30), None, None),)))
+    m_series["debt_company_specific"] = cs
+    return m_series
+
+
+DROPPED = {
+    "LongTermDebtCurrent": [row(20, "2025-12-31"), row(25, "2026-03-31", form="10-Q")],
+    "LongTermDebtNoncurrent": [row(280, "2025-12-31"), row(300, "2026-03-31", form="10-Q")],
+}
+
+
+def test_company_specific_debt_summed_and_flagged():
+    # FD-10 Q9
+    s = _with_company_debt(company(overrides=DROPPED, drop=("LongTermDebt",)),
+                           [("crwv:RecourseDebtCurrent", 60), ("crwv:RecourseDebtNonCurrent", 250)])
+    d = metrics.compute(s, date(2026, 6, 30), PRICE)["total_debt"]
+    assert d.value == 60 + 250 + 10 + 20  # + commercial paper + finance leases (10-K values, FD-10 Q3)
+    assert any("FD-10 Q9" in n for n in d.all_notes())
+
+
+def test_company_specific_debt_total_plus_parts_refused():
+    s = _with_company_debt(company(overrides=DROPPED, drop=("LongTermDebt",)),
+                           [("crwv:RecourseDebt", 310), ("crwv:RecourseDebtCurrent", 60)])
+    assert metrics.compute(s, date(2026, 6, 30), PRICE)["total_debt"].value is None

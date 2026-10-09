@@ -139,6 +139,28 @@ def _dropped(group: list[MetricSeries], end: date, fy_end: date | None, name: st
     )
 
 
+def _company_specific_debt(cs: MetricSeries | None, end: date) -> Figure | None:
+    """FD-10 Q9: with no standard debt tags at ``end``, sum the company's own debt lines.
+
+    Refused (None, so the caller shows n/a) if one tag name is a prefix of
+    another (e.g. RecourseDebt and RecourseDebtCurrent): that usually means a
+    total plus its parts, and summing would double count.
+    """
+    facts = [f for f in (cs.facts if cs else []) if f.end == end]
+    if not facts:
+        return None
+    names = [f.tag.split(":")[-1] for f in facts]
+    if any(a != b and b.startswith(a) for a in names for b in names):
+        return None
+    listed = ", ".join(f"{f.tag} {f.value / 1e6:,.0f}m" for f in facts)
+    return Figure(
+        name="long_term_debt", value=sum(f.value for f in facts), unit="USD",
+        formula="sum of the company's own debt lines (FD-10 Q9)", as_of=end,
+        facts=tuple((1, f) for f in facts),
+        notes=(f"No standard debt tags at {end}; summed company-specific debt lines: {listed} (FD-10 Q9)",),
+    )
+
+
 def _company_debt_hint(series: dict[str, MetricSeries]) -> str:
     cs = series.get("debt_company_specific")
     if not cs or not cs.facts:
@@ -183,7 +205,7 @@ def total_debt(series: dict[str, MetricSeries], end: date, fy_end: date | None) 
         ltd = _renamed(have, "long_term_debt")
         notes.append(f"Only {have.name} reported at {end}; the other part treated as 0 (FD-10 Q4)")
     else:
-        ltd = _dropped(
+        ltd = _company_specific_debt(series.get("debt_company_specific"), end) or _dropped(
             [series[m] for m in ("debt_long_term_current", "debt_long_term_noncurrent", "debt_long_term_total")],
             end, fy_end, "long_term_debt", _company_debt_hint(series),
         ) or Figure(name="long_term_debt", value=0.0, unit="USD", formula="not reported -> 0", as_of=end,
