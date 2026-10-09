@@ -147,6 +147,9 @@ class MetricDef:
     # Used only for periods where no tag in the chain has a value. Every tag
     # must be present for that period; a partial sum is not used.
     composite: tuple[str, ...] = ()
+    # Used alone for periods where the composite is incomplete but this tag is
+    # reported (FD-10 Q1: D&A = depreciation when amortization isn't broken out).
+    last_resort: str | None = None
     sum_share_classes: bool = False
 
 
@@ -176,6 +179,7 @@ METRICS: dict[str, MetricDef] = {
                 "DepreciationAmortizationAndAccretionNet",
             ),
             composite=("Depreciation", "AmortizationOfIntangibleAssets"),
+            last_resort="Depreciation",
         ),
         MetricDef("net_income", ("NetIncomeLoss",)),
         MetricDef("operating_cash_flow", ("NetCashProvidedByUsedInOperatingActivities",)),
@@ -284,6 +288,26 @@ def extract_metric(companyfacts: dict, mdef: MetricDef | str) -> MetricSeries:
                 restated=any(p.restated for p in parts),
                 note=f"Sum of {' + '.join(mdef.composite)} (no single D&A tag reported)",
             )
+        if mdef.last_resort:
+            # FD-10 Q1: e.g. Alphabet's cash flow statement shows depreciation
+            # only; intangible amortization sits in "other" and has no tag.
+            alone = [t for t in mdef.composite if t != mdef.last_resort]
+            for key in (partial - chosen.keys()) & by_tag[mdef.last_resort].keys():
+                base = by_tag[mdef.last_resort][key]
+                chosen[key] = Fact(
+                    metric=mdef.name,
+                    value=base.value,
+                    unit=mdef.unit,
+                    start=base.start,
+                    end=base.end,
+                    period_type=base.period_type,
+                    sources=base.sources,
+                    restated=base.restated,
+                    note=(
+                        f"{mdef.last_resort} only: {' / '.join(alone)} not reported for this "
+                        "period, so it may understate (FD-10 Q1)"
+                    ),
+                )
         missing_partial = partial - chosen.keys()
         if missing_partial:
             series.notes.append(

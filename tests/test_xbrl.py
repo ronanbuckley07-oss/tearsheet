@@ -185,8 +185,17 @@ def test_d_and_a_composite_used_only_when_no_chain_tag():
     assert len(fy22.sources) == 2 and fy22.note
 
 
-def test_d_and_a_partial_composite_left_missing_and_noted():
+def test_d_and_a_depreciation_alone_when_amortization_not_reported():
+    # FD-10 Q1: depreciation alone, flagged, when amortization isn't broken out.
     cf = facts({"Depreciation": [row(20, "2023-12-31", "2023-01-01")]})
+    s = extract_metric(cf, "d_and_a")
+    f = s.latest()
+    assert f.value == 20 and f.tag == "Depreciation"
+    assert "understate" in f.note and "FD-10 Q1" in f.note
+
+
+def test_d_and_a_amortization_alone_left_missing_and_noted():
+    cf = facts({"AmortizationOfIntangibleAssets": [row(9, "2023-12-31", "2023-01-01")]})
     s = extract_metric(cf, "d_and_a")
     assert not s
     assert any("only part of" in n for n in s.notes)

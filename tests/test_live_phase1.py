@@ -85,3 +85,10 @@ def test_msft_finance_leases_found(data):
     _, _, series = data["MSFT"]
     assert series["finance_lease_total"]
     assert not series["finance_lease_current"]
+
+
+def test_googl_fy2025_d_and_a_is_depreciation_only(data):
+    # FD-10 Q1: Alphabet's FY2025 cash flow shows depreciation only.
+    _, _, series = data["GOOGL"]
+    fy25 = series["d_and_a"].get(date(2025, 1, 1), date(2025, 12, 31))
+    assert fy25.value == 21_136_000_000 and fy25.tag == "Depreciation"
