@@ -19,4 +19,8 @@ streamlit run app.py
 
 ## Status
 
-Phase 0 (setup) is done. Phase 1 (data layer) code and fixture tests are written: `engine/tickers.py` and `engine/xbrl.py`. They have not yet been checked against live SEC data (`RUN_LIVE=1 pytest -m live`). To see what is extracted for a ticker, run `python scripts/inspect_ticker.py AAPL`.
+Phases 0 and 1 are done (data layer checked against live SEC data for AAPL, MSFT, GOOGL). Phase 2 (LTM periods, EBITDA, EV bridge, multiples) is built and awaiting review. Phase 2 is not done until the validation table in `SPEC.md` is filled in by hand and passes.
+
+- `python scripts/inspect_ticker.py AAPL`: raw extracted series with sources
+- `python scripts/inspect_metrics.py AAPL --sources`: LTM figures, EV bridge and multiples, each with its formula and the filings behind it
+- `RUN_LIVE=1 pytest -m live`: tests against real SEC and Yahoo Finance data

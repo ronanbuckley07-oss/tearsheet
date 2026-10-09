@@ -84,6 +84,8 @@ Later – Simple DCF, key risks from Item 1A, recent 8-K developments, saved rep
 
 Before Phase 2 is marked done, the owner picks three companies and fills in the expected values below by hand from the 10-K/10-Q. Tests assert the engine matches within 0.5%. Any mismatch gets explained, not patched over.
 
+How to fill it in: dollar amounts and shares in millions (commas are fine), period end as YYYY-MM-DD and equal to the latest 10-K/10-Q period end. "Diluted shares" is the diluted weighted-average share count for the latest quarter (or the fiscal year, if the latest filing is a 10-K). `RUN_LIVE=1 pytest tests/test_validation.py` reads this table directly; empty rows are skipped.
+
 | Ticker | Period end | LTM revenue | LTM EBITDA | Total debt | Cash + ST inv. | Diluted shares |
 |---|---|---|---|---|---|---|
 |  |  |  |  |  |  |  |
