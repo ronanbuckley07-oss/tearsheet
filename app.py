@@ -5,6 +5,8 @@ Run with: streamlit run app.py
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -17,6 +19,14 @@ from engine.sec_client import SECConfigError
 from engine.sources import fact_rows, formula_tree, other_sources
 
 st.set_page_config(page_title="Tearsheet", layout="wide")
+
+# Hosted deploys keep settings in Streamlit secrets; the engine reads environment variables.
+try:
+    for _k in ("SEC_USER_NAME", "SEC_CONTACT_EMAIL", "ANTHROPIC_API_KEY"):
+        if _k in st.secrets and not os.getenv(_k):
+            os.environ[_k] = str(st.secrets[_k])
+except Exception:  # no secrets file (local runs use .env)
+    pass
 
 # Reference categorical palette, slots 1-2 (validated light and dark, adjacent pairs).
 BLUE, ORANGE, GRAY = "#2a78d6", "#eb6834", "#8a8984"

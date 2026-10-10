@@ -86,8 +86,9 @@ class CachedResponse:
 def build_user_agent(name: str | None, email: str | None) -> str:
     if not name or not email or "@" not in email:
         raise SECConfigError(
-            "SEC requests need a name and contact email. Set SEC_USER_NAME and "
-            "SEC_CONTACT_EMAIL in .env (see .env.example)."
+            "SEC requests need a name and a real contact email. Set SEC_USER_NAME and "
+            "SEC_CONTACT_EMAIL in .env (see .env.example), or in the app's Secrets on "
+            "Streamlit Community Cloud."
         )
     return f"{name.strip()} {email.strip()}"
 
