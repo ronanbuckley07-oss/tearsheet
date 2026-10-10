@@ -105,3 +105,34 @@ def test_missing_target_shows_error(monkeypatch):
     at.text_input[0].set_value("ZZZZ")
     at.button[0].click().run()
     assert "not in the SEC ticker list" in at.error[0].value
+
+
+def fake_sector(name, tickers, **_):
+    from engine import sector
+    from tests.test_sector import screen
+    s = screen()
+    s.name = name
+    return s
+
+
+def test_sector_screen_and_deep_dive(monkeypatch):
+    monkeypatch.setattr("engine.report.build_report", fake_report)
+    monkeypatch.setattr("engine.report.build_sector", fake_sector)
+    st.cache_data.clear()
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.radio[0].set_value("Sector screen").run()
+    assert any("Choose a sector list" in i.value for i in at.info)
+    at.selectbox[0].set_value("Semiconductors").run()
+    assert "NVDA" in at.text_area[0].value
+    at.button[0].click().run()
+    assert not at.exception
+    assert "Talking points" in [s.value for s in at.subheader]
+    assert len(at.get("plotly_chart")) == 2  # scatter + ranking
+    assert len(at.get("download_button")) == 2
+    deep = next(b for b in at.button if b.label.startswith("Open A as a full tearsheet"))
+    deep.click().run()
+    assert not at.exception
+    assert at.radio[0].value == "Company tearsheet"
+    assert at.text_input[0].value == "A" and "B C D E" in at.text_area[0].value
+    assert len(at.get("download_button")) == 2 and "Talking points" in [s.value for s in at.subheader]

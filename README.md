@@ -23,6 +23,9 @@ Phases 0 to 3 are done: the data layer, LTM periods, EBITDA, the EV bridge and m
 
 - `streamlit run app.py`: the app. Enter a ticker and peers; every section has a "Sources" panel that shows the formula, the XBRL facts and a link to each filing behind any number.
 - The DCF section sits under the comps: it starts from 3 years of 10-K history, the 10-year Treasury yield and an adjusted beta, and every assumption can be edited.
+- Sector screen (Phase 4c, for pitch competitions): switch the view at the top to "Sector screen", pick one of 18 starter sector lists (or type tickers), and get every company side by side (size, growth, margins, multiples, premium/discount to the sector median, distance from the 52-week high), a valuation-vs-growth scatter with a fitted line, a ranking chart and computed talking points. "Open as a full tearsheet" takes the company you pick into the tearsheet with the rest of the sector as its peers.
+- Exports: both views have "Download Excel" (numbers in $m, summary rows as live MEDIAN / QUARTILE.INC formulas, a Sources sheet with the XBRL facts behind every figure) and "Download PowerPoint" (16:9 slides with editable native tables and charts: overview and talking points, financial summary, comps, football field, DCF; or the sector overview, comps, rankings and scatter).
+- Speed: companies load in parallel (the SEC rate limit is still shared across threads), prices are cached for 15 minutes per ticker, and SEC responses are cached on disk for a day, so a 12-company sector loads in a few seconds and re-screening is near instant.
 - `python scripts/inspect_ticker.py AAPL`: raw extracted series with sources
 - `python scripts/inspect_metrics.py AAPL --sources`: LTM figures, EV bridge and multiples, each with its formula and the filings behind it
 - `python scripts/run_comps.py NVDA AMD AVGO QCOM TXN`: comps table, peer stats and implied share price range

@@ -298,7 +298,7 @@ def compute(series: dict[str, MetricSeries], ltm_end: date, price: Figure) -> Co
     )
 
     # -- shares (FD-3)
-    F["shares_outstanding"] = shares_outstanding(series["shares_outstanding_cover"])
+    F["shares_outstanding"] = shares_outstanding(series["shares_outstanding_cover"], ltm_end)
     F["diluted_shares"] = diluted_shares(series["diluted_shares_weighted"], ltm_end)
     F["share_count_check"] = share_check(F["shares_outstanding"], F["diluted_shares"])
 
@@ -334,11 +334,16 @@ def ebitda(ebit: Figure, d_and_a: Figure, name: str) -> Figure:
                    as_of=ebit.as_of)
 
 
-def shares_outstanding(series: MetricSeries) -> Figure:
+def shares_outstanding(series: MetricSeries, ltm_end: date | None = None) -> Figure:
     """FD-3: latest cover-page shares outstanding, summed across classes."""
     f = series.latest()
     if f is None:
         return missing("shares outstanding", "shares", "; ".join(series.notes) or "not reported")
+    if ltm_end is not None and (ltm_end - f.end).days > 400:
+        # CLAUDE.md rule 3: a count from years ago is not today's share count.
+        return missing("shares outstanding", "shares",
+                       f"the latest cover-page count found is from {f.end}, over a year before the LTM date; "
+                       + ("; ".join(series.notes) or "the latest filing's count couldn't be read"))
     return Figure(
         name="shares outstanding", value=f.value, unit="shares",
         formula=f"cover-page shares outstanding as of {f.end} (FD-3)", as_of=f.end,

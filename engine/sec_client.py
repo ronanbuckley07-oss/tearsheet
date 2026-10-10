@@ -194,10 +194,12 @@ class SECClient:
         body_path.parent.mkdir(parents=True, exist_ok=True)
         # Write to temp files then rename, so an interrupted run never leaves
         # a half-written body that a later run would trust.
-        tmp_body = body_path.with_suffix(".json.tmp")
+        # The temp names are per thread: report.load_companies fetches in parallel.
+        tag = f"{threading.get_ident()}.tmp"
+        tmp_body = body_path.with_suffix(f".json.{tag}")
         tmp_body.write_text(json.dumps(data))
         tmp_body.replace(body_path)
-        tmp_meta = meta_path.with_suffix(".tmp")
+        tmp_meta = meta_path.with_suffix(f".{tag}")
         tmp_meta.write_text(json.dumps({"url": url, "fetched_at": fetched_at}))
         tmp_meta.replace(meta_path)
 

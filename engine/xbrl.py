@@ -26,8 +26,8 @@ and metrics.py in Phase 2.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
 from enum import Enum
 
 import re
@@ -35,6 +35,10 @@ import xml.etree.ElementTree as ET
 
 from engine.sec_client import SECClient, SECError
 from engine.tickers import CompanyMetadata, Filing, cik10, get_metadata
+
+# A cover-page share count this much older than the latest filing's period end is
+# re-read from that filing (FD-3 wants the latest count).
+STALE_COVER_DAYS = 200
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 
@@ -54,10 +58,12 @@ class PeriodType(str, Enum):
 
 # Day-count windows. Many companies use 52/53-week years, so a "year" is 364
 # or 371 days and a quarter is 91 or 98 days; the windows allow for that.
+# PepsiCo's 12/12/12/16-week quarters make its half year 168 days and its
+# nine months 252, so the YTD windows reach down that far.
 _PERIOD_WINDOWS = [
     (PeriodType.QUARTER, 80, 100),
-    (PeriodType.YTD_6M, 172, 192),
-    (PeriodType.YTD_9M, 262, 285),
+    (PeriodType.YTD_6M, 165, 192),
+    (PeriodType.YTD_9M, 248, 285),
     (PeriodType.ANNUAL, 350, 380),
 ]
 
@@ -157,6 +163,8 @@ class MetricDef:
     # reported (FD-10 Q1: D&A = depreciation when amortization isn't broken out).
     last_resort: str | None = None
     sum_share_classes: bool = False
+    # A note attached to every value taken from one of these tags (a fallback worth flagging).
+    tag_notes: tuple[tuple[str, str], ...] = ()
 
 
 # Starting chains from SPEC.md. Debt components are kept as separate series on
@@ -208,6 +216,8 @@ METRICS: dict[str, MetricDef] = {
             "interest_expense",
             ("InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense"),
         ),
+        # FD-10 Q15 fallback for filers with no operating income line (Lilly).
+        MetricDef("nonoperating_income", ("NonoperatingIncomeExpense",)),
         MetricDef("sbc", ("ShareBasedCompensation",)),
         MetricDef(
             "diluted_shares_weighted",
@@ -215,7 +225,14 @@ METRICS: dict[str, MetricDef] = {
             unit="shares",
         ),
         # Balance sheet (instants)
-        MetricDef("cash", ("CashAndCashEquivalentsAtCarryingValue",), instant=True),
+        # FD-10 Q14: some filers (P&G, Target, Starbucks, Chevron) tag the balance-sheet
+        # cash line only with the cash-flow total that includes restricted cash. Used
+        # only when the plain tag is missing for the date, and flagged in metrics.py.
+        MetricDef("cash", ("CashAndCashEquivalentsAtCarryingValue", "Cash",
+                           "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"), instant=True,
+                  tag_notes=(("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+                              "balance-sheet cash is tagged only with the total that includes restricted cash, "
+                              "so any restricted cash is included (FD-10 Q14)"),)),
         # Working capital for the DCF (FD-11).
         MetricDef("current_assets", ("AssetsCurrent",), instant=True),
         MetricDef("current_liabilities", ("LiabilitiesCurrent",), instant=True),
@@ -264,12 +281,18 @@ def get_company_facts(cik: int | str, client: SECClient) -> dict:
 def get_series(
     cik: int | str, client: SECClient, meta: CompanyMetadata | None = None
 ) -> dict[str, MetricSeries]:
-    """All metrics for a company, with the cover-share fallback applied."""
-    series = extract_all(get_company_facts(cik, client))
-    if not series["shares_outstanding_cover"]:
-        meta = meta or get_metadata(cik, client)
-        fill_cover_shares_from_filing(series["shares_outstanding_cover"], cik, meta, client)
+    """All metrics for a company, with the cover-share and operating-income fallbacks applied."""
     meta = meta or get_metadata(cik, client)
+    facts = add_unprocessed_filing(get_company_facts(cik, client), cik, meta, client)
+    series = extract_all(facts)
+    fill_operating_income(series)
+    cover, latest = series["shares_outstanding_cover"], meta.latest("10-K", "10-Q")
+    stale = (cover and latest and latest.report_date
+             and cover.latest().end < latest.report_date - timedelta(days=STALE_COVER_DAYS))
+    if not cover or stale:
+        # Visa's last undimensioned cover count in companyfacts is from 2010; since then
+        # it tags each share class separately, which companyfacts drops.
+        fill_cover_shares_from_filing(cover, cik, meta, client)
     filing = meta.latest("10-K", "10-Q")
     if filing and filing.report_date and not any(
         series[m].get(None, filing.report_date)
@@ -277,6 +300,146 @@ def get_series(
     ):
         series["debt_company_specific"] = company_specific_debt(cik, filing, client)
     return series
+
+
+# ---- filings companyfacts hasn't caught up with ------------------------------
+#
+# companyfacts is rebuilt by the SEC on its own schedule, and for some filers it
+# runs a quarter behind (Visa's July 2026 10-Q was still missing in October). The
+# filing's own XBRL instance has the same facts, so when the latest 10-K/10-Q's
+# accession number appears nowhere in companyfacts, its non-dimensional facts are
+# read from the instance and added in companyfacts' shape. Each one carries a
+# note saying so; the tag, form, accession and dates are the filing's own.
+
+INSTANCE_NOTE = "read from the filing's XBRL instance (SEC companyfacts didn't include this filing yet)"
+_UNIT_MEASURES = {"iso4217:USD": "USD", "shares": "shares", "xbrli:shares": "shares"}
+
+
+def add_unprocessed_filing(companyfacts: dict, cik: int | str, meta: CompanyMetadata,
+                           client: SECClient) -> dict:
+    filing = meta.latest("10-K", "10-Q")
+    if filing is None or _has_accession(companyfacts, filing.accession):
+        return companyfacts
+    url = instance_url(cik, filing)
+    if url is None:
+        return companyfacts
+    try:
+        rows = instance_rows(client.get_text(url), filing)
+    except (SECError, ET.ParseError):
+        return companyfacts
+    return merge_rows(companyfacts, rows)
+
+
+def _has_accession(companyfacts: dict, accession: str) -> bool:
+    for tags in companyfacts.get("facts", {}).values():
+        for node in tags.values():
+            for rows in node.get("units", {}).values():
+                if any(r.get("accn") == accession for r in rows):
+                    return True
+    return False
+
+
+def instance_rows(xml_text: str, filing: Filing) -> dict[str, dict[str, dict[str, list[dict]]]]:
+    """taxonomy -> tag -> unit -> companyfacts-style rows, for non-dimensional facts."""
+    root = ET.fromstring(xml_text)
+    contexts: dict[str, tuple[str | None, str]] = {}
+    for ctx in root.iter(f"{_XBRLI}context"):
+        if any(m.tag.endswith("explicitMember") or m.tag.endswith("typedMember") for m in ctx.iter()):
+            continue  # companyfacts drops dimensional facts too
+        p = ctx.find(f"{_XBRLI}period")
+        if p is None:
+            continue
+        inst, start, end = (p.find(f"{_XBRLI}{k}") for k in ("instant", "startDate", "endDate"))
+        if inst is not None and inst.text:
+            contexts[ctx.get("id")] = (None, inst.text.strip())
+        elif start is not None and end is not None and start.text and end.text:
+            contexts[ctx.get("id")] = (start.text.strip(), end.text.strip())
+    units = {}
+    for u in root.iter(f"{_XBRLI}unit"):
+        measures = [m.text.strip() for m in u.iter(f"{_XBRLI}measure") if m.text]
+        if len(measures) == 1 and measures[0] in _UNIT_MEASURES:
+            units[u.get("id")] = _UNIT_MEASURES[measures[0]]
+    ns_tax = {"fasb.org/us-gaap": "us-gaap", "xbrl.sec.gov/dei": "dei"}
+    fy = fp = None
+    for el in root:
+        if el.tag.endswith("}DocumentFiscalYearFocus") and el.text:
+            fy = int(el.text.strip()[:4]) if el.text.strip()[:4].isdigit() else None
+        elif el.tag.endswith("}DocumentFiscalPeriodFocus") and el.text:
+            fp = el.text.strip()
+    out: dict = {}
+    for el in root:
+        ns, _, local = el.tag.rpartition("}")
+        tax = next((t for k, t in ns_tax.items() if k in ns), None)
+        ctx = contexts.get(el.get("contextRef"))
+        unit = units.get(el.get("unitRef"))
+        if tax is None or ctx is None or unit is None or not el.text:
+            continue
+        try:
+            val = float(el.text.strip())
+        except ValueError:
+            continue
+        row = {"end": ctx[1], "val": val, "accn": filing.accession, "fy": fy, "fp": fp,
+               "form": filing.form, "filed": filing.filing_date.isoformat(), "_note": INSTANCE_NOTE}
+        if ctx[0]:
+            row["start"] = ctx[0]
+        bucket = out.setdefault(tax, {}).setdefault(local, {}).setdefault(unit, [])
+        if row not in bucket:
+            bucket.append(row)
+    return out
+
+
+def merge_rows(companyfacts: dict, rows: dict) -> dict:
+    """A copy of companyfacts with ``rows`` appended (the cached JSON is left untouched)."""
+    facts = {tax: dict(tags) for tax, tags in companyfacts.get("facts", {}).items()}
+    for tax, tags in rows.items():
+        dest = facts.setdefault(tax, {})
+        for tag, by_unit in tags.items():
+            node = dest.get(tag, {})
+            units = dict(node.get("units", {}))
+            for unit, new in by_unit.items():
+                units[unit] = list(units.get(unit, [])) + new
+            dest[tag] = {**node, "units": units}
+    return {**companyfacts, "facts": facts}
+
+
+# ---- operating income when there is no operating income line ----------------
+
+EBIT_FALLBACK_NOTES = {
+    "interest": ("no operating income line reported: EBIT = pre-tax income + interest expense "
+                 "(FD-10 Q15; includes other non-operating income and expense)"),
+    "nonoperating": ("no operating income line reported: EBIT = pre-tax income - non-operating income "
+                     "(expense), net (FD-10 Q15)"),
+}
+
+
+def fill_operating_income(series: dict[str, MetricSeries]) -> None:
+    """FD-10 Q15: pharma, energy and some industrials (Lilly, J&J, Chevron, Deere, KLA)
+    don't report an operating income subtotal. For periods with no OperatingIncomeLoss:
+    EBIT = pre-tax income + interest expense when both are reported for the period;
+    otherwise pre-tax income - non-operating income (expense), net, when that is."""
+    op, pretax = series["operating_income"], series["pretax_income"]
+    interest, nonop = series["interest_expense"], series.get("nonoperating_income", MetricSeries("x"))
+    have = {(f.start, f.end) for f in op.facts}
+    added = 0
+    for f in pretax.facts:
+        if (f.start, f.end) in have:
+            continue
+        i, n = interest.get(f.start, f.end), nonop.get(f.start, f.end)
+        if i is not None:
+            value, other, how = f.value + i.value, i, "interest"
+        elif n is not None:
+            value, other, how = f.value - n.value, n, "nonoperating"
+        else:
+            continue
+        op.facts.append(Fact(
+            metric="operating_income", value=value, unit="USD", start=f.start, end=f.end,
+            period_type=f.period_type, sources=f.sources + other.sources, restated=f.restated or other.restated,
+            note=EBIT_FALLBACK_NOTES[how] + (f"; {f.note}" if f.note else ""),
+        ))
+        added += 1
+    if added:
+        op.facts.sort(key=lambda x: (x.end, x.start or date.min))
+        op.notes.append(f"{added} period(s) with no operating income line use the FD-10 Q15 fallback")
 
 
 # ---- company-specific debt tags (information only) ----------------------------
@@ -416,6 +579,11 @@ def extract_metric(companyfacts: dict, mdef: MetricDef | str) -> MetricSeries:
                 f"{' + '.join(mdef.composite)}; left as missing rather than summing a partial figure"
             )
 
+    if mdef.tag_notes:
+        flags = dict(mdef.tag_notes)
+        for key, f in chosen.items():
+            if f.tag in flags:
+                chosen[key] = replace(f, note="; ".join(n for n in (flags[f.tag], f.note) if n))
     series.facts = sorted(chosen.values(), key=lambda f: (f.end, f.start or date.min))
     if not series.facts:
         series.notes.append(f"No {mdef.unit} values found for tags: {', '.join(mdef.tags)}")

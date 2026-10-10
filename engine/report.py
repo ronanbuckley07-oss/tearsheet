@@ -7,14 +7,15 @@ share price (via market). Everything it returns is built by the pure modules
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
-from engine import comps, dcf, market, metrics
+from engine import comps, dcf, market, metrics, sector
 from engine.comps import CompanyRow
 from engine.periods import Figure
 from engine.sec_client import SECClient, SECError
-from engine.tickers import TickerNotFound, get_metadata, lookup, normalize_ticker
+from engine.tickers import TickerNotFound, get_metadata, load_ticker_map, lookup, normalize_ticker
 from engine.xbrl import get_series
 
 
@@ -53,13 +54,39 @@ def load_company(ticker: str, client: SECClient,
     )
 
 
+# Companies load in parallel: SEC requests still share one process-wide rate limiter
+# (sec_client), so this only overlaps the waiting, never exceeds 10 requests/second.
+MAX_WORKERS = 8
+
+
+def load_companies(tickers: list[str], client: SECClient,
+                   get_quote: Callable[[str], market.Quote] = market.get_quote) -> list[CompanyRow]:
+    """load_company for each ticker, in parallel, in the order given."""
+    if len(tickers) <= 1:
+        return [load_company(t, client, get_quote) for t in tickers]
+    try:
+        load_ticker_map(client)  # download the shared ticker list once, before the threads ask for it
+    except SECError:
+        pass  # each company will report the failure itself
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(tickers))) as pool:
+        return list(pool.map(lambda t: load_company(t, client, get_quote), tickers))
+
+
+def build_sector(name: str, tickers: list[str], client: SECClient | None = None,
+                 get_quote: Callable[[str], market.Quote] = market.get_quote) -> sector.Sector:
+    client = client or SECClient()
+    rows = load_companies([t for t in tickers if t.strip()], client, get_quote)
+    for row in rows:
+        row.series = None
+    return sector.build(name, rows)
+
+
 def build_report(target: str, peers: list[str], client: SECClient | None = None,
                  get_quote: Callable[[str], market.Quote] = market.get_quote,
                  get_risk_free: Callable[[], Figure] = market.get_risk_free,
                  get_beta: Callable[[str], Figure] = market.get_beta) -> Report:
     client = client or SECClient()
-    t = load_company(target, client, get_quote)
-    rows = [load_company(p, client, get_quote) for p in peers if p.strip()]
+    t, *rows = load_companies([target, *(p for p in peers if p.strip())], client, get_quote)
     c = comps.build(t, rows)
     base = None
     if t.metrics is not None:

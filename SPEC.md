@@ -74,6 +74,8 @@ Weekend target: Phases 0–4.
 
 Phase 4b – DCF (added 2026-10-10 at the owner's request, ahead of the original order). Unlevered DCF built from the tearsheet's data, every assumption editable, with WACC, sensitivity table and a football field bar. Rules in FD-11.
 
+Phase 4c – Sector screen and pitch exports (added 2026-10-10 at the owner's request, for pitch competitions). Many companies side by side with sector statistics (FD-12), starter sector lists (engine/presets.py), deterministic talking points (engine/pitch.py, templates over computed numbers, no LLM), Excel and PowerPoint downloads (engine/export.py), and parallel loading. Screening 18 sectors surfaced data gaps that were fixed as FD-10 Q14-Q16.
+
 Phase 5 – Peer suggestions. LLM reads the company's business description and SIC code and proposes 10–15 peers with a one-line reason each. Every ticker is validated against company_tickers.json and checked for being a 10-K filer. User approves or edits the list before comps run.
 
 Phase 6 – Narrative. Business overview from 10-K Item 1 text. Each paragraph cites the filing it came from. The LLM receives the computed numbers as input and may reference them but never produce new ones. Item extraction from 10-K HTML is messy; consider the edgartools package for this part (check it is maintained and fits).

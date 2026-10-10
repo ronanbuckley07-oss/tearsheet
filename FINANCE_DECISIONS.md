@@ -115,6 +115,9 @@ When Claude Code hits a judgment call not covered above, it logs it here and ask
 - Q11 (2026-10-10, Phase 3, FD-7). Percentile method: 25th/75th percentiles use linear interpolation between ranks, the same as Excel's PERCENTILE.INC (and QUARTILE.INC), so any figure can be reproduced in a spreadsheet. Decision: Suggested (owner, 2026-10-10). Implemented.
 - Q12 (2026-10-10, Phase 3, FD-5). Net income when a company stops tagging NetIncomeLoss: Broadcom reports only ProfitLoss (consolidated net income incl. noncontrolling interests) from FY2025. Used as a fallback, flagged in the notes; identical when there's no NCI. Decision: Suggested (owner, 2026-10-10). Implemented.
 - Q13 (2026-10-10, Phase 3, FD-1). Cash-flow D&A split across two lines: AMD and Marvell show "depreciation and amortization" (OtherDepreciationAndAmortization) plus "amortization of acquisition-related intangibles" on the cash flow statement. That pair is summed and preferred over Depreciation (from the PP&E note) + AmortizationOfIntangibleAssets, since FD-1 says D&A comes from the cash flow statement. Decision: Suggested (owner, 2026-10-10). Implemented.
+- Q14 (2026-10-10, Phase 4c, FD-2). Balance-sheet cash tagged only as CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents (P&G, Target, Starbucks, Chevron use the cash-flow total for the balance-sheet line, usually because restricted cash is nil or immaterial). Used only when CashAndCashEquivalentsAtCarryingValue and Cash are both missing for the date, flagged on the figure as possibly including restricted cash. Decided by Claude under the 2026-10-10 delegation. Implemented in engine/xbrl.py.
+- Q15 (2026-10-10, Phase 4c, FD-1). No operating income line (Lilly, J&J, Merck, Chevron, ConocoPhillips, Deere, KLA). For periods with no OperatingIncomeLoss: EBIT = pre-tax income + interest expense (the usual data-provider convention; it leaves other non-operating income/expense inside EBIT), or, when interest expense isn't tagged for the period (Lilly), pre-tax income - "other income (expense), net" (NonoperatingIncomeExpense). Each value is flagged with the method; a reported operating income always wins. Decided by Claude. Implemented in engine/xbrl.py.
+- Q16 (2026-10-10, Phase 4c, rule 2/3). Two data-freshness fixes. (a) SEC's companyfacts API sometimes lags a filing by months (Visa's July 2026 10-Q was missing in October; also PayPal, Coca-Cola, Abbott, General Dynamics, Ford, NXP). When the latest 10-K/10-Q's accession appears nowhere in companyfacts, its non-dimensional us-gaap/dei facts are read from that filing's own XBRL instance, with the same tag/form/accession/date provenance and a note on each fact. (b) A cover-page share count more than 200 days older than the latest filing is re-read from that filing (Visa's last undimensioned count in companyfacts is from 2010), and one more than 400 days older than the LTM date is n/a rather than used. Also: PepsiCo's 12/12/12/16-week calendar makes its half-year 168 days and nine months 252, so the YTD period windows were widened to 165-192 and 248-285 days. Decided by Claude. Implemented in engine/xbrl.py and engine/metrics.py.
 
 ---
 
@@ -141,3 +144,18 @@ Decided by Claude 2026-10-10. The owner delegated finance calls ("I don't need t
 - Sanity flags (shown, change nothing): capex above 1.5x D&A when the steady-state toggle is off, NWC beyond +/-50% of revenue, terminal value above 85% of EV.
 
 Why it matters: comps say what the market pays for similar companies; a DCF says what the cash flows are worth on your own assumptions. The defaults are history carried forward, which is a starting point, not a forecast. Most defaults land well below today's prices for the AI-cycle names (heavy current capex is assumed to continue forever, betas are high). Seeing which assumption moves the answer is the point of the exercise.
+
+---
+
+FD-12. Sector screen
+
+Decided by Claude 2026-10-10 (owner's delegation). Implemented in engine/sector.py; the screen has no target.
+
+- Statistics. Median, mean, 25th and 75th percentiles per column, over every company in the screen with a usable value. FD-6 NM rules and the FD-7 percentile method (Excel QUARTILE.INC) are unchanged. Unlike comps, nobody is excluded as "the target": the screen describes the whole sector.
+- Relative value. Company multiple / sector median - 1, for EV/Revenue, EV/EBITDA and P/E. n/a when the company's multiple is NM.
+- Distance from the 52-week high = share price / 52-week high - 1.
+- Fitted line on the scatter charts. Ordinary least squares over companies with both values (NM excluded), shown with R². It is a picture of how the market prices growth or margins in this group, not a valuation method, so it produces no implied price. Needs 3+ companies.
+- Talking points (engine/pitch.py) are fixed sentence templates over these numbers; a sentence is dropped when a number it needs is NM or n/a. No LLM is involved (CLAUDE.md rule 1).
+- Starter sector lists (engine/presets.py) are a starting point for FD-9, not a peer selection. Banks, insurers and REITs are left out because EV/EBITDA doesn't describe them.
+
+Why it matters: a pitch starts with the sector. Lining up who trades where, and against what growth and margins, is how you find a stock that looks mispriced and how you defend the peer set you then use for its comps.
