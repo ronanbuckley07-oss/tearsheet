@@ -261,6 +261,7 @@ class Result:
     implied_growth_from_exit: float | None
     reason: str | None = None  # why the whole DCF is n/a
     notes: list[str] = field(default_factory=list)  # sanity flags on the assumptions
+    terminal_fcf: Figure | None = None  # the cash flow the perpetuity grows from
 
 
 def wacc(a: dict[str, Figure], m: CompanyMetrics) -> tuple[Figure, Figure]:
@@ -307,7 +308,8 @@ def project(a: dict[str, Figure], revenue0: float, w: float, mid_year: bool) -> 
 
 
 def run(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool = False,
-        wacc_override: float | None = None, growth_override: float | None = None) -> Result:
+        wacc_override: float | None = None, growth_override: float | None = None,
+        steady_state: bool = True) -> Result:
     F = m.figures
     w_fig, ke = wacc(a, m)
     if wacc_override is not None:
@@ -342,11 +344,12 @@ def run(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool = Fa
     # Mid-year: the perpetuity's cash also arrives through the year, so it is
     # discounted from year 4.5 (the Rosenbaum & Pearl convention).
     tv_period = YEARS - 0.5 if mid_year else float(YEARS)
-    if last.ufcf <= 0:
-        return na(f"year-{YEARS} free cash flow is negative ({last.ufcf / 1e9:,.1f}bn); "
+    tfcf = terminal_fcf(last, steady_state)
+    if tfcf.value <= 0:
+        return na(f"terminal-year free cash flow is negative ({tfcf.value / 1e9:,.1f}bn); "
                   "a perpetuity of it isn't a valuation (NM)")
-    tv = Figure("terminal value", last.ufcf * (1 + g) / (w - g), "USD",
-                f"UFCF year {YEARS} x (1 + {g:.2%}) / (WACC {w:.2%} - {g:.2%})", inputs=(w_fig, g_fig))
+    tv = Figure("terminal value", tfcf.value * (1 + g) / (w - g), "USD",
+                f"terminal-year UFCF x (1 + {g:.2%}) / (WACC {w:.2%} - {g:.2%})", inputs=(tfcf, w_fig, g_fig))
     pv_tv = Figure("PV of terminal value", tv.value / (1 + w) ** tv_period, "USD",
                    f"terminal value / (1 + WACC)^{tv_period:g}", inputs=(tv,))
     ev = Figure("DCF enterprise value", pv_fcf.value + pv_tv.value, "USD",
@@ -356,16 +359,36 @@ def run(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool = Fa
 
     ebitda5 = last.ebit + last.d_and_a
     implied_mult = tv.value / ebitda5 if ebitda5 > 0 else None
-    exit_px, implied_g = _exit_cross_check(base, m, years, w, ebitda5)
+    exit_px, implied_g = _exit_cross_check(base, m, years, w, ebitda5, tfcf.value)
     return Result(years, w_fig, ke, tv, pv_tv, pv_fcf, ev, eq, px, pv_tv.value / ev.value, implied_mult,
-                  exit_px, implied_g, notes=sanity_notes(a, pv_tv.value / ev.value))
+                  exit_px, implied_g, notes=sanity_notes(a, pv_tv.value / ev.value, steady_state),
+                  terminal_fcf=tfcf)
 
 
-def sanity_notes(a: dict[str, Figure], tv_share: float) -> list[str]:
+def terminal_fcf(last: Year, steady_state: bool) -> Figure:
+    """The cash flow the perpetuity grows from (FD-11).
+
+    Steady state (default): if year-5 capex is above D&A, capex is set equal to D&A.
+    Capex above depreciation is growth investment (a data-center or fab build-out);
+    a company growing only at the terminal rate forever doesn't keep building at
+    that pace. Capex below D&A is left alone: that gap is usually amortization of
+    acquired intangibles, which never has to be "replaced" with capex.
+    """
+    capex = min(last.capex, last.d_and_a) if steady_state else last.capex
+    value = last.nopat + last.d_and_a - capex - last.nwc_change
+    if steady_state and capex < last.capex:
+        formula = (f"year-{YEARS} NOPAT + D&A - capex set equal to D&A ({capex / 1e9:,.1f}bn instead of "
+                   f"{last.capex / 1e9:,.1f}bn: steady state, FD-11) - increase in NWC")
+    else:
+        formula = f"year-{YEARS} unlevered free cash flow"
+    return Figure("terminal-year free cash flow", value, "USD", formula)
+
+
+def sanity_notes(a: dict[str, Figure], tv_share: float, steady_state: bool = True) -> list[str]:
     """Flags for assumptions that usually deserve a second look. They change nothing."""
     v = {k: f.value for k, f in a.items()}
     notes = []
-    if v["da_pct"] > 0 and v["capex_pct"] > 1.5 * v["da_pct"]:
+    if v["da_pct"] > 0 and v["capex_pct"] > 1.5 * v["da_pct"] and not steady_state:
         notes.append(
             f"Capex ({v['capex_pct']:.1%} of revenue) is {v['capex_pct'] / v['da_pct']:.1f}x D&A "
             f"({v['da_pct']:.1%}). The terminal value assumes that spending continues forever while growth "
@@ -380,7 +403,7 @@ def sanity_notes(a: dict[str, Figure], tv_share: float) -> list[str]:
     return notes
 
 
-def _exit_cross_check(base: Base, m: CompanyMetrics, years: list[Year], w: float, ebitda5: float):
+def _exit_cross_check(base: Base, m: CompanyMetrics, years: list[Year], w: float, ebitda5: float, u: float):
     """Terminal value from the peer median EV/EBITDA instead of perpetuity growth."""
     mult = base.peer_median_ev_ebitda
     if mult is None or not mult.ok:
@@ -393,13 +416,12 @@ def _exit_cross_check(base: Base, m: CompanyMetrics, years: list[Year], w: float
                 inputs=(mult,))
     px = price_from_equity(equity_from_ev(ev, m, "DCF equity value (exit multiple)"), m,
                            "DCF share price (exit multiple)")
-    u = years[-1].ufcf
     implied_g = (tv * w - u) / (tv + u)  # solves tv = u(1+g)/(w-g) for g
     return px, implied_g
 
 
 def sensitivity(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool,
-                wacc_steps=WACC_STEPS, growth_steps=GROWTH_STEPS) -> tuple[list[float], list[float], list[list]]:
+                wacc_steps=WACC_STEPS, growth_steps=GROWTH_STEPS, steady_state: bool = True) -> tuple[list[float], list[float], list[list]]:
     """Share price for each (WACC, terminal growth) pair: rows are WACC, columns growth."""
     w0, _ = wacc(a, m)
     g0 = a["terminal_growth"]
@@ -407,15 +429,17 @@ def sensitivity(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: b
         return [], [], []
     ws = [w0.value + s for s in wacc_steps]
     gs = [g0.value + s for s in growth_steps]
-    grid = [[run(a, m, base, mid_year, wacc_override=w, growth_override=g).share_price for g in gs] for w in ws]
+    grid = [[run(a, m, base, mid_year, wacc_override=w, growth_override=g, steady_state=steady_state).share_price
+             for g in gs] for w in ws]
     return ws, gs, grid
 
 
-def football_bar(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool) -> dict:
+def football_bar(a: dict[str, Figure], m: CompanyMetrics, base: Base, mid_year: bool,
+                 steady_state: bool = True) -> dict:
     """FD-11: the DCF bar spans WACC +/-1% and terminal growth +/-0.5%."""
     label = "DCF (WACC ±1%, g ±0.5%)"
     _, _, grid = sensitivity(a, m, base, mid_year, wacc_steps=(-0.01, 0.0, 0.01),
-                             growth_steps=FOOTBALL_GROWTH_STEPS)
+                             growth_steps=FOOTBALL_GROWTH_STEPS, steady_state=steady_state)
     vals = [f.value for row in grid for f in row if f.ok]
     if len(vals) < 9:
         reason = next((f.reason for row in grid for f in row if not f.ok), "DCF n/a")

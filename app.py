@@ -346,7 +346,7 @@ else:
     keys = [*dcf_mod.GROWTH_KEYS, *dcf_mod.OPERATING_KEYS, *dcf_mod.WACC_KEYS, "terminal_growth"]
     skey = lambda k: f"dcf-{t.ticker}-{k}"  # noqa: E731
     if st.button("Reset assumptions to defaults", key=f"dcf-reset-{t.ticker}"):
-        for k in keys + ["mid_year"]:
+        for k in keys + ["mid_year", "steady"]:
             st.session_state.pop(skey(k), None)
 
     def shown(f: Figure, key: str) -> float | None:
@@ -383,10 +383,14 @@ else:
     mid_year = cols[5].toggle("Mid-year convention", key=skey("mid_year"),
                               help="Off: each year's cash arrives at year end. On: it arrives mid-year "
                                    "(discounted half a year less), which gives a slightly higher value. Banks use both.")
+    steady = cols[5].toggle("Steady-state terminal year", value=True, key=skey("steady"),
+                            help="On: if year-5 capex is above D&A, the terminal value uses capex = D&A. Spending "
+                                 "above depreciation is growth investment, and a company growing only at the "
+                                 "terminal rate forever doesn't keep building at that pace (FD-11).")
 
     for n in dict.fromkeys(n for f in assume.values() for n in f.notes):
         st.caption(md(f"Note: {n}"))
-    res = dcf_mod.run(assume, m, b, mid_year)
+    res = dcf_mod.run(assume, m, b, mid_year, steady_state=steady)
     if res.reason:
         st.warning(md(f"DCF not available: {res.reason}"))
     else:
@@ -407,7 +411,11 @@ else:
         for n in res.notes:
             st.caption(md(f"Check: {n}"))
         usd = lambda v: fmt(Figure("", v, "USD", ""))  # noqa: E731
-        cols = ["LTM (base)"] + [f"Year {y.n}" for y in res.years]
+        cols = ["LTM (base)"] + [f"Year {y.n}" for y in res.years] + ["Terminal year"]
+        y5, tf = res.years[-1], res.terminal_fcf.value
+        t_capex = y5.nopat + y5.d_and_a - y5.nwc_change - tf
+        terminal = {"= NOPAT": usd(y5.nopat), "+ D&A": usd(y5.d_and_a), "− Capex": usd(-t_capex),
+                    "− Increase in NWC": usd(-y5.nwc_change), "= Unlevered free cash flow": usd(tf)}
         lines = {
             "Revenue": [fmt(F["ltm_revenue"])] + [usd(y.revenue) for y in res.years],
             "Growth": [fmt(F["revenue_growth_ltm"])] + [f"{y.growth:.1%}" for y in res.years],
@@ -422,7 +430,10 @@ else:
             "Discount factor": [""] + [f"{y.discount_factor:.3f}" for y in res.years],
             "PV of free cash flow": [""] + [usd(y.pv) for y in res.years],
         }
+        lines = {k: v + [terminal.get(k, "")] for k, v in lines.items()}
         show(pd.DataFrame(lines, index=cols).T)
+        if res.terminal_fcf.formula.startswith(f"year-{dcf_mod.YEARS} NOPAT"):
+            st.caption(md(f"Terminal year: {res.terminal_fcf.formula}. The perpetuity grows from this cash flow."))
 
         left, right = st.columns(2)
         with left:
@@ -453,14 +464,15 @@ else:
                 st.caption(md(f"Exit-multiple cross-check: n/a ({res.exit_price.reason})."))
 
         st.markdown("**Sensitivity: share price by WACC (rows) and terminal growth (columns)**")
-        ws, gs, grid = dcf_mod.sensitivity(assume, m, b, mid_year)
+        ws, gs, grid = dcf_mod.sensitivity(assume, m, b, mid_year, steady_state=steady)
         sens = pd.DataFrame([[fmt(f) for f in row] for row in grid],
                             index=[f"{w:.2%}" for w in ws], columns=[f"g {g:.2%}" for g in gs])
         show(sens, label="WACC")
-        dcf_bar = dcf_mod.football_bar(assume, m, b, mid_year)
+        dcf_bar = dcf_mod.football_bar(assume, m, b, mid_year, steady_state=steady)
 
     sources_panel("DCF", {"DCF share price": res.share_price, "DCF enterprise value": res.enterprise_value,
-                          "PV of terminal value": res.pv_terminal, "WACC": res.wacc,
+                          "PV of terminal value": res.pv_terminal,
+                          "Terminal-year free cash flow": res.terminal_fcf or res.pv_terminal, "WACC": res.wacc,
                           "Cost of equity": res.cost_of_equity}
                   | {dcf_mod.LABELS[k]: assume[k] for k in keys}
                   | {f"Net working capital, FY{y.end.year}": y.nwc for y in b.years}, t.cik, "dcf")

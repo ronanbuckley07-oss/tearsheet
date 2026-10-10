@@ -198,6 +198,26 @@ def test_beta_default_is_adjusted_toward_one():
 
 
 def test_sanity_notes_flag_heavy_capex_and_terminal_weight():
-    r = dcf.run(assumptions(capex_pct=0.10), company(), base())
+    r = dcf.run(assumptions(capex_pct=0.10), company(), base(), steady_state=False)
     assert any("Capex" in n and "2.0x D&A" in n for n in r.notes)
     assert dcf.run(assumptions(), company(), base()).notes == []
+
+
+def test_steady_state_terminal_year_caps_capex_at_d_and_a():
+    # Capex 10% of revenue vs D&A 5%. Year 5: revenue 1,610.51, NOPAT 241.58, D&A 80.53,
+    # capex 161.05, NWC increase 14.64.
+    #   steady state: 241.58 + 80.53 - 80.53 - 14.64 = 226.94 (capex set to D&A)
+    #   as projected: 241.58 + 80.53 - 161.05 - 14.64 = 146.41
+    on = dcf.run(assumptions(capex_pct=0.10), company(), base())
+    off = dcf.run(assumptions(capex_pct=0.10), company(), base(), steady_state=False)
+    assert on.terminal_fcf.value == pytest.approx(226.9355, abs=0.001)
+    assert off.terminal_fcf.value == pytest.approx(146.41, abs=0.01)
+    assert on.years[-1].capex == off.years[-1].capex  # only the terminal year changes
+    assert on.share_price.value > off.share_price.value
+
+
+def test_steady_state_leaves_capex_below_d_and_a_alone():
+    # Amortization-heavy companies (capex < D&A) keep their projected capex.
+    on = dcf.run(assumptions(capex_pct=0.02), company(), base())
+    off = dcf.run(assumptions(capex_pct=0.02), company(), base(), steady_state=False)
+    assert on.share_price.value == pytest.approx(off.share_price.value)
