@@ -34,3 +34,10 @@ def test_non_usd_is_na():
 def test_live_quote():
     q = get_quote("MSFT")
     assert q.price.value and q.low_52w.value <= q.price.value <= q.high_52w.value
+
+
+def test_trailing_nan_row_ignored():
+    h = history()
+    h.loc[pd.Timestamp("2026-10-10", tz="America/New_York")] = [float("nan")] * 3
+    q = quote_from_history("AAPL", h, "USD")
+    assert q.price.value == 336.64 and str(q.price.as_of) == "2026-10-09"

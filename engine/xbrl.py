@@ -148,6 +148,11 @@ class MetricDef:
     # Used only for periods where no tag in the chain has a value. Every tag
     # must be present for that period; a partial sum is not used.
     composite: tuple[str, ...] = ()
+    # Tried before ``composite`` (same all-parts-present rule). AMD and Marvell
+    # show cash-flow D&A as OtherDepreciationAndAmortization (D&A excluding
+    # acquired intangibles) plus AmortizationOfIntangibleAssets; FD-1 wants the
+    # cash flow statement, so this beats the depreciation note figure.
+    pre_composite: tuple[str, ...] = ()
     # Used alone for periods where the composite is incomplete but this tag is
     # reported (FD-10 Q1: D&A = depreciation when amortization isn't broken out).
     last_resort: str | None = None
@@ -179,10 +184,13 @@ METRICS: dict[str, MetricDef] = {
                 "DepreciationAndAmortization",
                 "DepreciationAmortizationAndAccretionNet",
             ),
+            pre_composite=("OtherDepreciationAndAmortization", "AmortizationOfIntangibleAssets"),
             composite=("Depreciation", "AmortizationOfIntangibleAssets"),
             last_resort="Depreciation",
         ),
-        MetricDef("net_income", ("NetIncomeLoss",)),
+        # ProfitLoss (consolidated, incl. noncontrolling interests) only when
+        # NetIncomeLoss isn't reported for the period: Broadcom switched in FY2025.
+        MetricDef("net_income", ("NetIncomeLoss", "ProfitLoss")),
         MetricDef("operating_cash_flow", ("NetCashProvidedByUsedInOperatingActivities",)),
         MetricDef("capex", ("PaymentsToAcquirePropertyPlantAndEquipment",)),
         MetricDef("sbc", ("ShareBasedCompensation",)),
@@ -330,7 +338,7 @@ def extract_metric(companyfacts: dict, mdef: MetricDef | str) -> MetricSeries:
 
     # Per tag: deduped facts keyed by (start, end).
     by_tag: dict[str, dict[tuple, Fact]] = {}
-    for tag in mdef.tags + mdef.composite:
+    for tag in dict.fromkeys(mdef.tags + mdef.pre_composite + mdef.composite):
         by_tag[tag] = _tag_facts(companyfacts, mdef, tag, series.notes)
 
     # Per period, the first tag in the chain that has a value wins (SPEC.md).
@@ -345,21 +353,24 @@ def extract_metric(companyfacts: dict, mdef: MetricDef | str) -> MetricSeries:
                 break
 
     if mdef.composite:
+        for combo in (mdef.pre_composite, mdef.composite):
+            if not combo:
+                continue
+            for key in set.intersection(*(set(by_tag[t]) for t in combo)) - chosen.keys():
+                parts = [by_tag[t][key] for t in combo]
+                chosen[key] = Fact(
+                    metric=mdef.name,
+                    value=sum(p.value for p in parts),
+                    unit=mdef.unit,
+                    start=key[0],
+                    end=key[1],
+                    period_type=parts[0].period_type,
+                    sources=tuple(p.source for p in parts),
+                    restated=any(p.restated for p in parts),
+                    note=f"Sum of {' + '.join(combo)} (no single D&A tag reported)",
+                )
         comp_periods = set.intersection(*(set(by_tag[t]) for t in mdef.composite))
         partial = set().union(*(set(by_tag[t]) for t in mdef.composite)) - comp_periods
-        for key in comp_periods - chosen.keys():
-            parts = [by_tag[t][key] for t in mdef.composite]
-            chosen[key] = Fact(
-                metric=mdef.name,
-                value=sum(p.value for p in parts),
-                unit=mdef.unit,
-                start=key[0],
-                end=key[1],
-                period_type=parts[0].period_type,
-                sources=tuple(p.source for p in parts),
-                restated=any(p.restated for p in parts),
-                note=f"Sum of {' + '.join(mdef.composite)} (no single D&A tag reported)",
-            )
         if mdef.last_resort:
             # FD-10 Q1: e.g. Alphabet's cash flow statement shows depreciation
             # only; intangible amortization sits in "other" and has no tag.

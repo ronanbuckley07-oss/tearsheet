@@ -75,6 +75,9 @@ def _fact_notes(facts: list[tuple[int, Fact]]) -> list[str]:
         period = f"{f.start}..{f.end}" if f.start else f"{f.end}"
         if f.note:
             notes.append(f"{f.metric} {period}: {f.note}")
+        if f.tag == "ProfitLoss":
+            notes.append(f"{f.metric} {period}: ProfitLoss used (NetIncomeLoss not reported); "
+                         "includes any noncontrolling interests' share")
         if f.restated:
             notes.append(f"{f.metric} {period}: restated; latest filed value used ({f.source.accession})")
     tags = {f.tag for _, f in facts}

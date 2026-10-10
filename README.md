@@ -19,8 +19,9 @@ streamlit run app.py
 
 ## Status
 
-Phases 0 and 1 are done (data layer checked against live SEC data for AAPL, MSFT, GOOGL). Phase 2 (LTM periods, EBITDA, EV bridge, multiples) is built, and the validation table in `SPEC.md` (NVDA, CRWV, AVGO) passes within 0.5%. Awaiting the owner's review.
+Phases 0 and 1 are done (data layer checked against live SEC data for AAPL, MSFT, GOOGL). Phase 2 (LTM periods, EBITDA, EV bridge, multiples) is built, and the validation table in `SPEC.md` (NVDA, CRWV, AVGO) passes within 0.5%. Phase 3 (comps table, FD-7 peer statistics, FD-8 implied valuation range) is built and awaiting review.
 
 - `python scripts/inspect_ticker.py AAPL`: raw extracted series with sources
 - `python scripts/inspect_metrics.py AAPL --sources`: LTM figures, EV bridge and multiples, each with its formula and the filings behind it
+- `python scripts/run_comps.py NVDA AMD AVGO QCOM TXN`: comps table, peer stats and implied share price range
 - `RUN_LIVE=1 pytest -m live`: tests against real SEC and Yahoo Finance data

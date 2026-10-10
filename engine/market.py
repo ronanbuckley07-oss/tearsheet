@@ -36,6 +36,9 @@ def get_quote(ticker: str) -> Quote:
 
 def quote_from_history(ticker: str, hist, currency: str | None) -> Quote:
     """Build a Quote from a yfinance daily history DataFrame (pure, testable)."""
+    if hist is not None:
+        # Yahoo sometimes returns a row for today with no prices yet.
+        hist = hist.dropna(subset=["Close", "High", "Low"])
     if hist is None or len(hist) == 0:
         return _all_missing(f"{SOURCE} returned no price history for {ticker}")
     if currency and currency != "USD":
