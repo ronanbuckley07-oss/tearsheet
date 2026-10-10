@@ -1,0 +1,15 @@
+# Render blueprint: New > Blueprint, point it at this repo, then fill in the two env vars.
+services:
+  - type: web
+    name: tearsheet
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: SEC_USER_NAME
+        sync: false
+      - key: SEC_CONTACT_EMAIL
+        sync: false

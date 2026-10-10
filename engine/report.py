@@ -44,7 +44,11 @@ def load_company(ticker: str, client: SECClient,
         return CompanyRow(t, company.name, None, error=f"SEC request failed: {exc}")
     quote = get_quote(company.ticker)
     m = metrics.compute(series, last.report_date, quote.price)
-    return CompanyRow(t, company.name, m, high_52w=quote.high_52w, low_52w=quote.low_52w)
+    return CompanyRow(
+        t, company.name, m, high_52w=quote.high_52w, low_52w=quote.low_52w,
+        cik=company.cik, sic_description=meta.sic_description, fiscal_year_end=meta.fiscal_year_end,
+        latest_filing=f"{last.form} {last.accession} (period end {last.report_date})",
+    )
 
 
 def build_report(target: str, peers: list[str], client: SECClient | None = None,

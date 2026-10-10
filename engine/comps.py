@@ -35,6 +35,10 @@ class CompanyRow:
     high_52w: Figure | None = None
     low_52w: Figure | None = None
     error: str | None = None  # why the whole row is unusable (not found, foreign filer...)
+    cik: int | None = None
+    sic_description: str | None = None
+    fiscal_year_end: str | None = None  # "MMDD"
+    latest_filing: str | None = None  # e.g. "10-Q 0001045810-26-000075 (period end 2026-07-26)"
 
     def get(self, key: str) -> Figure:
         if self.metrics is None:
