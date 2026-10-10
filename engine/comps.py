@@ -39,6 +39,7 @@ class CompanyRow:
     sic_description: str | None = None
     fiscal_year_end: str | None = None  # "MMDD"
     latest_filing: str | None = None  # e.g. "10-Q 0001045810-26-000075 (period end 2026-07-26)"
+    series: dict | None = field(default=None, repr=False)  # raw xbrl series, kept for the DCF
 
     def get(self, key: str) -> Figure:
         if self.metrics is None:

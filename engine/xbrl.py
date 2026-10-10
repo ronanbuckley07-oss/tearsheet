@@ -192,7 +192,22 @@ METRICS: dict[str, MetricDef] = {
         # NetIncomeLoss isn't reported for the period: Broadcom switched in FY2025.
         MetricDef("net_income", ("NetIncomeLoss", "ProfitLoss")),
         MetricDef("operating_cash_flow", ("NetCashProvidedByUsedInOperatingActivities",)),
-        MetricDef("capex", ("PaymentsToAcquirePropertyPlantAndEquipment",)),
+        # NVIDIA and Qualcomm tag capex as PaymentsToAcquireProductiveAssets
+        # ("purchases of property and equipment and intangible assets").
+        MetricDef("capex", ("PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets")),
+        # DCF inputs (FD-11): tax rate, cost of debt.
+        MetricDef("income_tax", ("IncomeTaxExpenseBenefit",)),
+        MetricDef(
+            "pretax_income",
+            (
+                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+            ),
+        ),
+        MetricDef(
+            "interest_expense",
+            ("InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt", "InterestAndDebtExpense"),
+        ),
         MetricDef("sbc", ("ShareBasedCompensation",)),
         MetricDef(
             "diluted_shares_weighted",
@@ -201,6 +216,9 @@ METRICS: dict[str, MetricDef] = {
         ),
         # Balance sheet (instants)
         MetricDef("cash", ("CashAndCashEquivalentsAtCarryingValue",), instant=True),
+        # Working capital for the DCF (FD-11).
+        MetricDef("current_assets", ("AssetsCurrent",), instant=True),
+        MetricDef("current_liabilities", ("LiabilitiesCurrent",), instant=True),
         MetricDef(
             "short_term_investments",
             (

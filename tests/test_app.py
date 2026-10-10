@@ -16,6 +16,7 @@ from engine.comps import CompanyRow
 from engine.periods import Figure
 from engine.report import Report
 from tests.test_comps import company, fig
+from tests.test_dcf import company as dcf_company, history_base
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -42,7 +43,8 @@ def fake_report(target, peers, **_):
                    latest_filing="10-Q 0000000001-26-000001 (period end 2026-06-30)")
     peers = [company(p, m, **EXTRA) for p, m in (("A", 8), ("B", 14), ("C", 10), ("D", 12), ("E", None))]
     peers.append(CompanyRow("F", "F", None, error="files 20-F/40-F (foreign filer); v1 covers 10-K filers only"))
-    return Report(target=t, comps=comps.build(t, peers))
+    t.metrics.figures.update({k: v for k, v in dcf_company().figures.items() if k not in t.metrics.figures})
+    return Report(target=t, comps=comps.build(t, peers), dcf_base=history_base())
 
 
 @pytest.fixture
@@ -72,9 +74,24 @@ def test_full_page_renders(app):
     captions = " ".join(c.value for c in app.caption)
     assert r"\$80.00 to \$130.00" in captions  # escaped, so it isn't rendered as LaTeX
     assert len(app.get("plotly_chart")) == 2  # financials + football field
+    assert "Discounted cash flow (FD-11)" in subheaders and "Football field" in subheaders
     notes = " ".join(m.value for m in app.markdown)
     assert "F: left out of the comps" in notes and "E EV/EBITDA: NM" in notes
-    assert len([e for e in app.expander if e.label.startswith("Sources")]) == 5
+    assert len([e for e in app.expander if e.label.startswith("Sources")]) == 6
+
+
+def test_dcf_responds_to_edits(app):
+    app.text_input[0].set_value("T")
+    app.button[0].click().run()
+    price = {m.label: m.value for m in app.metric}["DCF share price"]
+    margin = next(n for n in app.number_input if n.label == "EBIT margin (%)")
+    assert margin.value == 17.5  # 3-year total EBIT / revenue from history_base()
+    margin.set_value(30.0).run()
+    assert not app.exception
+    assert {m.label: m.value for m in app.metric}["DCF share price"] != price
+    g = next(n for n in app.number_input if n.label == "Terminal growth rate (%)")
+    g.set_value(50.0).run()
+    assert any("not above terminal growth" in w.value for w in app.warning)
 
 
 def test_missing_target_shows_error(monkeypatch):

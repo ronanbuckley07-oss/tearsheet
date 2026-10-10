@@ -72,13 +72,15 @@ Phase 4 – Streamlit UI. Ticker input, peer list editor, snapshot, financial su
 
 Weekend target: Phases 0–4.
 
+Phase 4b – DCF (added 2026-10-10 at the owner's request, ahead of the original order). Unlevered DCF built from the tearsheet's data, every assumption editable, with WACC, sensitivity table and a football field bar. Rules in FD-11.
+
 Phase 5 – Peer suggestions. LLM reads the company's business description and SIC code and proposes 10–15 peers with a one-line reason each. Every ticker is validated against company_tickers.json and checked for being a 10-K filer. User approves or edits the list before comps run.
 
 Phase 6 – Narrative. Business overview from 10-K Item 1 text. Each paragraph cites the filing it came from. The LLM receives the computed numbers as input and may reference them but never produce new ones. Item extraction from 10-K HTML is messy; consider the edgartools package for this part (check it is maintained and fits).
 
 Phase 7 – Export. Report rendered through templates/report.html. HTML download first; PDF (WeasyPrint or similar) once the HTML is stable.
 
-Later – Simple DCF, key risks from Item 1A, recent 8-K developments, saved report history.
+Later – Key risks from Item 1A, recent 8-K developments, saved report history.
 
 ## Validation set
 

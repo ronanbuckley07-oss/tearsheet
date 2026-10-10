@@ -10,8 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from engine import comps, market, metrics
+from engine import comps, dcf, market, metrics
 from engine.comps import CompanyRow
+from engine.periods import Figure
 from engine.sec_client import SECClient, SECError
 from engine.tickers import TickerNotFound, get_metadata, lookup, normalize_ticker
 from engine.xbrl import get_series
@@ -21,6 +22,7 @@ from engine.xbrl import get_series
 class Report:
     target: CompanyRow
     comps: comps.Comps
+    dcf_base: dcf.Base | None = None  # FD-11 inputs from filings and markets; None if the target failed
 
 
 def load_company(ticker: str, client: SECClient,
@@ -47,13 +49,26 @@ def load_company(ticker: str, client: SECClient,
     return CompanyRow(
         t, company.name, m, high_52w=quote.high_52w, low_52w=quote.low_52w,
         cik=company.cik, sic_description=meta.sic_description, fiscal_year_end=meta.fiscal_year_end,
-        latest_filing=f"{last.form} {last.accession} (period end {last.report_date})",
+        latest_filing=f"{last.form} {last.accession} (period end {last.report_date})", series=series,
     )
 
 
 def build_report(target: str, peers: list[str], client: SECClient | None = None,
-                 get_quote: Callable[[str], market.Quote] = market.get_quote) -> Report:
+                 get_quote: Callable[[str], market.Quote] = market.get_quote,
+                 get_risk_free: Callable[[], Figure] = market.get_risk_free,
+                 get_beta: Callable[[str], Figure] = market.get_beta) -> Report:
     client = client or SECClient()
     t = load_company(target, client, get_quote)
     rows = [load_company(p, client, get_quote) for p in peers if p.strip()]
-    return Report(target=t, comps=comps.build(t, rows))
+    c = comps.build(t, rows)
+    base = None
+    if t.metrics is not None:
+        base = dcf.build_base(t.series, t.metrics, get_risk_free(), get_beta(t.ticker))
+        s = c.stats.get("ev_ebitda")
+        if s is not None and s.median is not None:
+            base.peer_median_ev_ebitda = Figure(
+                "peer median EV/EBITDA", s.median, "x", f"median of {s.n} peers (FD-7)")
+    # The raw series are only needed to build the DCF base; drop them so the cached report stays small.
+    for row in [t, *rows]:
+        row.series = None
+    return Report(target=t, comps=c, dcf_base=base)

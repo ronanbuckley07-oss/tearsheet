@@ -115,3 +115,28 @@ When Claude Code hits a judgment call not covered above, it logs it here and ask
 - Q11 (2026-10-10, Phase 3, FD-7). Percentile method: 25th/75th percentiles use linear interpolation between ranks, the same as Excel's PERCENTILE.INC (and QUARTILE.INC), so any figure can be reproduced in a spreadsheet. Decision: Suggested (owner, 2026-10-10). Implemented.
 - Q12 (2026-10-10, Phase 3, FD-5). Net income when a company stops tagging NetIncomeLoss: Broadcom reports only ProfitLoss (consolidated net income incl. noncontrolling interests) from FY2025. Used as a fallback, flagged in the notes; identical when there's no NCI. Decision: Suggested (owner, 2026-10-10). Implemented.
 - Q13 (2026-10-10, Phase 3, FD-1). Cash-flow D&A split across two lines: AMD and Marvell show "depreciation and amortization" (OtherDepreciationAndAmortization) plus "amortization of acquisition-related intangibles" on the cash flow statement. That pair is summed and preferred over Depreciation (from the PP&E note) + AmortizationOfIntangibleAssets, since FD-1 says D&A comes from the cash flow statement. Decision: Suggested (owner, 2026-10-10). Implemented.
+
+---
+
+FD-11. Discounted cash flow (DCF)
+
+Decided by Claude 2026-10-10. The owner delegated finance calls ("I don't need to sign off on all finance decisions, just build"); each is listed here so it can still be changed. Implemented in engine/dcf.py; every assumption is editable in the app.
+
+- Free cash flow. Unlevered free cash flow = EBIT x (1 - tax rate) + D&A - capex - increase in net working capital. Stock-based comp stays inside EBIT as a real cost (consistent with FD-1). No tax is charged on a negative EBIT (no loss carryforwards are modeled).
+- Forecast. 5 years. Year 1 is the 12 months after the LTM date; LTM revenue is the base.
+- Starting values. Revenue growth starts at LTM growth and fades in a straight line to terminal growth by year 5. EBIT margin, D&A and capex are 3-fiscal-year totals divided by 3-year total revenue (a revenue-weighted average) from 10-Ks. Net working capital is the average of NWC / revenue at the last 3 fiscal year ends, and stays at that % of revenue, so the cash tied up each year = NWC % x the increase in revenue.
+- Net working capital = (current assets - cash - short-term investments) - (current liabilities - current debt - short-term borrowings - commercial paper - current finance leases). Cash and debt come out because the EV bridge handles them.
+- Tax rate. 3-year total tax expense / total pretax income. If that is negative, above 50%, or missing, the 21% US federal rate is used and flagged.
+- Cost of equity (CAPM) = risk-free rate + beta x equity risk premium.
+  - Risk-free: the latest 10-year Treasury par yield from home.treasury.gov.
+  - Beta: raw beta from 60 complete months of dividend-adjusted returns against the S&P 500 (Yahoo Finance), then adjusted toward 1 as Bloomberg does: 0.67 x raw + 0.33. Fewer than 24 months of history means n/a (enter one).
+  - Equity risk premium: 5.0% (a judgment input; Damodaran's published estimate is a common reference).
+- Cost of debt = LTM interest expense / total debt at the LTM date, then x (1 - tax rate) inside WACC. n/a when the company doesn't tag interest expense (Apple stopped in FY2023); enter it.
+- WACC weights. Market equity value (FD-3 shares x price) and total debt (FD-2).
+- Terminal value. Perpetuity growth, g = 2.5%. NM if WACC <= g or year-5 free cash flow is negative. The exit-multiple method (peer median EV/EBITDA x year-5 EBITDA) is shown as a cross-check with the perpetual growth rate it implies, and the perpetuity method's implied EV/EBITDA is shown too.
+- Discounting. End-of-year by default. The mid-year toggle discounts each year's cash half a year less, and the perpetuity terminal value from year 4.5 (Rosenbaum & Pearl convention); the exit-multiple terminal value always from year 5.
+- To share price. Reverse the FD-2 bridge, divide by FD-3 cover-page shares (as FD-8).
+- Output. Share price, a 5x5 sensitivity table (WACC +/-1% and terminal growth +/-1%, in 0.5% steps), and a football field bar spanning WACC +/-1% and growth +/-0.5%.
+- Sanity flags (shown, change nothing): capex above 1.5x D&A, NWC beyond +/-50% of revenue, terminal value above 85% of EV.
+
+Why it matters: comps say what the market pays for similar companies; a DCF says what the cash flows are worth on your own assumptions. The defaults are history carried forward, which is a starting point, not a forecast. Most defaults land well below today's prices for the AI-cycle names (heavy current capex is assumed to continue forever, betas are high). Seeing which assumption moves the answer is the point of the exercise.

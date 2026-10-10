@@ -19,9 +19,10 @@ streamlit run app.py
 
 ## Status
 
-Phases 0 to 3 are done: the data layer, LTM periods, EBITDA, the EV bridge and multiples (validated in `SPEC.md` against NVDA, CRWV and AVGO within 0.5%), and the comps engine with FD-7 peer statistics and the FD-8 implied valuation. Phase 4 (the Streamlit app) is built and awaiting review.
+Phases 0 to 3 are done: the data layer, LTM periods, EBITDA, the EV bridge and multiples (validated in `SPEC.md` against NVDA, CRWV and AVGO within 0.5%), and the comps engine with FD-7 peer statistics and the FD-8 implied valuation. Phase 4 (the Streamlit app) and Phase 4b (a DCF, FD-11) are built and awaiting review.
 
 - `streamlit run app.py`: the app. Enter a ticker and peers; every section has a "Sources" panel that shows the formula, the XBRL facts and a link to each filing behind any number.
+- The DCF section sits under the comps: it starts from 3 years of 10-K history, the 10-year Treasury yield and an adjusted beta, and every assumption can be edited.
 - `python scripts/inspect_ticker.py AAPL`: raw extracted series with sources
 - `python scripts/inspect_metrics.py AAPL --sources`: LTM figures, EV bridge and multiples, each with its formula and the filings behind it
 - `python scripts/run_comps.py NVDA AMD AVGO QCOM TXN`: comps table, peer stats and implied share price range

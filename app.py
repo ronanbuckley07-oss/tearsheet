@@ -9,9 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from engine import dcf as dcf_mod
 from engine import report as report_mod
 from engine.comps import CONTEXT, MULTIPLES, VALUATION_BASES
-from engine.periods import Figure
+from engine.periods import Figure, missing
 from engine.sec_client import SECConfigError
 from engine.sources import fact_rows, formula_tree, other_sources
 
@@ -298,7 +299,7 @@ else:
             for n in f.all_notes():
                 st.markdown(md(f"- {n}"))
 
-    # ---- implied valuation (FD-8) + football field ------------------------------------------
+    # ---- implied valuation (FD-8) ------------------------------------------
     st.subheader("Implied valuation (FD-8)")
     imp_rows, imp_figs = [], {}
     for key, r in c.implied.items():
@@ -316,32 +317,175 @@ else:
             imp_figs[f"{LABELS[key]} {point}: implied price"] = r.share_price[i]
     show(pd.DataFrame(imp_rows), label=None, Note=st.column_config.TextColumn("Note", width="large"))
 
-    bars = c.football_field()
-    usable = [b for b in bars if b["low"] is not None and b["high"] is not None]
-    if usable:
-        ff = go.Figure()
-        price = F["price"].value
-        for b in reversed(usable):
-            if b["label"] == "Current price":
-                continue
-            color = GRAY if b["label"] == "52-week range" else BLUE
-            ff.add_bar(y=[b["label"]], x=[b["high"] - b["low"]], base=[b["low"]], orientation="h",
-                       marker_color=color, marker_line_width=0, width=0.5, showlegend=False,
-                       text=[f"${b['low']:,.0f} - ${b['high']:,.0f}"], textposition="outside",
-                       hovertemplate=f"{b['label']}: ${b['low']:,.2f} to ${b['high']:,.2f}<extra></extra>")
-        if price:
-            ff.add_vline(x=price, line_width=2, line_dash="dot", line_color=ORANGE,
-                         annotation_text=f"Current ${price:,.2f}", annotation_position="top")
-        ff.update_layout(height=80 + 70 * len(usable), margin=dict(l=10, r=40, t=40, b=10),
-                         xaxis_title="Share price (USD)", xaxis_tickprefix="$")
-        ff.update_traces(cliponaxis=False)
-        st.plotly_chart(ff, width="stretch", theme="streamlit")
-        st.caption("Blue bars: target's LTM metric × peer 25th-75th percentile multiple, bridged back to "
-                   "equity value and divided by cover-page shares. Gray: 52-week trading range.")
-    skipped = [b for b in bars if b not in usable]
-    for b in skipped:
-        st.caption(md(f"{b['label']}: not shown ({b['reason']})"))
     sources_panel("implied valuation", imp_figs, t.cik, "imp")
+
+# ---- DCF (FD-11) -------------------------------------------------------------------------------
+
+st.subheader("Discounted cash flow (FD-11)")
+dcf_bar = None
+b = rep.dcf_base
+if b is None:
+    st.info("The DCF needs the target's filings, which didn't load.")
+else:
+    st.caption(md(
+        "A DCF values the business on the cash it will produce for all investors (unlevered free cash flow), "
+        "discounted at their required return (WACC), plus a terminal value for the years after year 5. "
+        "History comes from the filings; the forecast is assumptions. Each box starts from the company's "
+        "own history or a stated convention (hover the ? to see which) and you can change any of them."))
+    defaults = dcf_mod.default_assumptions(b, m)
+    keys = [*dcf_mod.GROWTH_KEYS, *dcf_mod.OPERATING_KEYS, *dcf_mod.WACC_KEYS, "terminal_growth"]
+    skey = lambda k: f"dcf-{t.ticker}-{k}"  # noqa: E731
+    if st.button("Reset assumptions to defaults", key=f"dcf-reset-{t.ticker}"):
+        for k in keys + ["mid_year"]:
+            st.session_state.pop(skey(k), None)
+
+    def shown(f: Figure, key: str) -> float | None:
+        """Default as displayed: percent with 2 decimals, beta with 2 decimals."""
+        if f.value is None:
+            return None
+        return round(f.value if dcf_mod.UNITS[key] == "x" else f.value * 100, 2)
+
+    assume: dict[str, Figure] = {}
+
+    def box(col, key: str, label: str | None = None) -> None:
+        d = defaults[key]
+        is_x = dcf_mod.UNITS[key] == "x"
+        v = col.number_input(label or dcf_mod.LABELS[key] + ("" if is_x else " (%)"), value=shown(d, key),
+                             step=0.05 if is_x else 0.25, format="%.2f", key=skey(key),
+                             help=d.formula if d.ok else f"No default: {d.reason}")
+        if v is None:
+            assume[key] = missing(dcf_mod.LABELS[key], dcf_mod.UNITS[key], d.reason or "no value entered")
+        elif v == shown(d, key):
+            assume[key] = d
+        else:
+            assume[key] = dcf_mod.edited(key, v if is_x else v / 100, d)
+
+    st.markdown("**Revenue growth**")
+    for i, (col, k) in enumerate(zip(st.columns(dcf_mod.YEARS), dcf_mod.GROWTH_KEYS), 1):
+        box(col, k, f"Year {i} (%)")
+    st.markdown("**Operations** (each as a % of that year's revenue, except tax)")
+    for col, k in zip(st.columns(5), dcf_mod.OPERATING_KEYS):
+        box(col, k)
+    st.markdown("**Discount rate and terminal value**")
+    cols = st.columns(6)
+    for col, k in zip(cols, [*dcf_mod.WACC_KEYS, "terminal_growth"]):
+        box(col, k)
+    mid_year = cols[5].toggle("Mid-year convention", key=skey("mid_year"),
+                              help="Off: each year's cash arrives at year end. On: it arrives mid-year "
+                                   "(discounted half a year less), which gives a slightly higher value. Banks use both.")
+
+    for n in dict.fromkeys(n for f in assume.values() for n in f.notes):
+        st.caption(md(f"Note: {n}"))
+    res = dcf_mod.run(assume, m, b, mid_year)
+    if res.reason:
+        st.warning(md(f"DCF not available: {res.reason}"))
+    else:
+        price_now = F["price"]
+        up = (res.share_price.value / price_now.value - 1) if price_now.ok and res.share_price.ok else None
+        tiles = st.columns(5)
+        tiles[0].metric("DCF share price", fmt(res.share_price),
+                        delta=None if up is None else f"{up:+.1%} vs current", help=res.share_price.formula)
+        tiles[1].metric("DCF enterprise value", fmt(res.enterprise_value))
+        tiles[2].metric("WACC", fmt(res.wacc), help=res.wacc.formula)
+        tiles[3].metric("Terminal value % of EV", f"{res.tv_share_of_ev:.0%}",
+                        help="Share of the value that comes from after year 5. Above ~75% means the answer "
+                             "rests mostly on the terminal assumptions.")
+        tiles[4].metric("Implied exit multiple", "n/a" if res.implied_exit_multiple is None
+                        else f"{res.implied_exit_multiple:.1f}x",
+                        help="Terminal value / year-5 EBITDA. Compare it with the peer EV/EBITDA multiples.")
+
+        for n in res.notes:
+            st.caption(md(f"Check: {n}"))
+        usd = lambda v: fmt(Figure("", v, "USD", ""))  # noqa: E731
+        cols = ["LTM (base)"] + [f"Year {y.n}" for y in res.years]
+        lines = {
+            "Revenue": [fmt(F["ltm_revenue"])] + [usd(y.revenue) for y in res.years],
+            "Growth": [fmt(F["revenue_growth_ltm"])] + [f"{y.growth:.1%}" for y in res.years],
+            "EBIT": [fmt(F["ltm_operating_income"])] + [usd(y.ebit) for y in res.years],
+            "− Taxes on EBIT": [""] + [usd(-y.taxes) for y in res.years],
+            "= NOPAT": [""] + [usd(y.nopat) for y in res.years],
+            "+ D&A": [fmt(F["ltm_d_and_a"])] + [usd(y.d_and_a) for y in res.years],
+            "− Capex": [""] + [usd(-y.capex) for y in res.years],
+            "− Increase in NWC": [""] + [usd(-y.nwc_change) for y in res.years],
+            "= Unlevered free cash flow": [""] + [usd(y.ufcf) for y in res.years],
+            "Discount period (years)": [""] + [f"{y.period:g}" for y in res.years],
+            "Discount factor": [""] + [f"{y.discount_factor:.3f}" for y in res.years],
+            "PV of free cash flow": [""] + [usd(y.pv) for y in res.years],
+        }
+        show(pd.DataFrame(lines, index=cols).T)
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**From enterprise value to share price**")
+            bridge = [("PV of free cash flows", res.pv_fcf), ("+ PV of terminal value", res.pv_terminal),
+                      ("= Enterprise value", res.enterprise_value),
+                      ("− Total debt", F["total_debt"]), ("− Preferred stock", F["preferred_stock"]),
+                      ("− Noncontrolling interest", F["noncontrolling_interest"]), ("+ Cash", F["cash"]),
+                      ("+ Short-term investments", F["short_term_investments"]),
+                      ("= Equity value", res.equity_value), ("÷ Shares outstanding", F["shares_outstanding"]),
+                      ("= Share price", res.share_price)]
+            show(pd.DataFrame({"value": [fmt(f) for _, f in bridge]}, index=[l for l, _ in bridge]))
+        with right:
+            st.markdown("**WACC**")
+            ke = res.cost_of_equity
+            wacc_rows = [("Risk-free rate", assume["risk_free"]), ("× Beta", assume["beta"]),
+                         ("× Equity risk premium", assume["erp"]), ("= Cost of equity (CAPM)", ke),
+                         ("Pre-tax cost of debt", assume["cost_of_debt"]), ("Tax rate", assume["tax_rate"]),
+                         ("Equity value (weight)", F["equity_value"]), ("Total debt (weight)", F["total_debt"]),
+                         ("= WACC", res.wacc)]
+            show(pd.DataFrame({"value": [fmt(f) for _, f in wacc_rows]}, index=[l for l, _ in wacc_rows]))
+            if res.exit_price.ok:
+                st.caption(md(
+                    f"Cross-check: valuing year 5 at the peer median {b.peer_median_ev_ebitda.value:.1f}x EV/EBITDA "
+                    f"instead gives {fmt(res.exit_price)} per share, which implies perpetual growth of "
+                    f"{res.implied_growth_from_exit:.1%}."))
+            else:
+                st.caption(md(f"Exit-multiple cross-check: n/a ({res.exit_price.reason})."))
+
+        st.markdown("**Sensitivity: share price by WACC (rows) and terminal growth (columns)**")
+        ws, gs, grid = dcf_mod.sensitivity(assume, m, b, mid_year)
+        sens = pd.DataFrame([[fmt(f) for f in row] for row in grid],
+                            index=[f"{w:.2%}" for w in ws], columns=[f"g {g:.2%}" for g in gs])
+        show(sens, label="WACC")
+        dcf_bar = dcf_mod.football_bar(assume, m, b, mid_year)
+
+    sources_panel("DCF", {"DCF share price": res.share_price, "DCF enterprise value": res.enterprise_value,
+                          "PV of terminal value": res.pv_terminal, "WACC": res.wacc,
+                          "Cost of equity": res.cost_of_equity}
+                  | {dcf_mod.LABELS[k]: assume[k] for k in keys}
+                  | {f"Net working capital, FY{y.end.year}": y.nwc for y in b.years}, t.cik, "dcf")
+
+# ---- football field ----------------------------------------------------------------------------
+
+st.subheader("Football field")
+bars = c.football_field()
+if dcf_bar is not None:
+    bars.insert(len(c.implied), dcf_bar)
+usable = [b_ for b_ in bars if b_["low"] is not None and b_["high"] is not None]
+if usable:
+    ff = go.Figure()
+    price = F["price"].value
+    for b_ in reversed(usable):
+        if b_["label"] == "Current price":
+            continue
+        color = GRAY if b_["label"] == "52-week range" else BLUE
+        ff.add_bar(y=[b_["label"]], x=[b_["high"] - b_["low"]], base=[b_["low"]], orientation="h",
+                   marker_color=color, marker_line_width=0, width=0.5, showlegend=False,
+                   text=[f"${b_['low']:,.0f} - ${b_['high']:,.0f}"], textposition="outside",
+                   hovertemplate=f"{b_['label']}: ${b_['low']:,.2f} to ${b_['high']:,.2f}<extra></extra>")
+    if price:
+        ff.add_vline(x=price, line_width=2, line_dash="dot", line_color=ORANGE,
+                     annotation_text=f"Current ${price:,.2f}", annotation_position="top")
+    ff.update_layout(height=80 + 70 * len(usable), margin=dict(l=10, r=40, t=40, b=10),
+                     xaxis_title="Share price (USD)", xaxis_tickprefix="$")
+    ff.update_traces(cliponaxis=False)
+    st.plotly_chart(ff, width="stretch", theme="streamlit")
+    st.caption("Comps bars: target's LTM metric × peer 25th-75th percentile multiple, bridged back to equity "
+               "value and divided by cover-page shares. DCF bar: the sensitivity table's corners at WACC ±1% "
+               "and terminal growth ±0.5%. Gray: 52-week trading range.")
+for b_ in bars:
+    if b_ not in usable:
+        st.caption(md(f"{b_['label']}: not shown ({b_['reason']})"))
 
 # ---- every flag in one place -----------------------------------------------------------------
 
