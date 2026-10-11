@@ -1079,3 +1079,184 @@ CHAINS = {
 
 def chain(key: str) -> str:
     return CHAINS[assumption_concept(key)]
+
+
+# ---- the Learn page: a short course, illustrated with a real company ---------------------
+
+
+@dataclass(frozen=True)
+class Chapter:
+    title: str
+    intro: tuple[str, ...]  # paragraphs, same for every company
+    figures: tuple[str, ...] = ()  # CompanyMetrics keys shown as worked examples
+    questions: tuple[tuple[str, str], ...] = ()  # interview-style check: (question, answer)
+    special: str | None = None  # a section the app draws itself: "comps", "dcf", "drivers"
+
+
+COURSE: tuple[Chapter, ...] = (
+    Chapter(
+        "1. What this tool does",
+        ("A tearsheet is the one-page company profile bankers put at the front of a pitch: what the company "
+         "sells, how fast it grows, how profitable it is, what the market values it at, and what it might be "
+         "worth. Tearsheet builds one from a ticker.",
+         "Every number comes from two places: the company's filings with the SEC (10-K annual and 10-Q "
+         "quarterly reports, read as XBRL data) and the market share price. Nothing is typed in by hand and "
+         "no AI produces a number. Every figure has a Sources panel that links to the exact filing it came from.",
+         "The tearsheet answers two questions. What is the company worth if it traded like its peers? "
+         "(trading comps). And what is it worth on its own cash flows? (the DCF). This course walks through "
+         "both, using a real company's numbers. Pick any ticker at the top; the examples update."),
+        questions=(
+            ("Why use filings instead of a data website?",
+             "Filings are the primary source: audited (10-K) or reviewed (10-Q), and every number can be traced to "
+             "a line in a document. In an interview you can say exactly where a number came from."),
+        ),
+    ),
+    Chapter(
+        "2. The income statement: revenue to EBITDA",
+        ("Start at the top line. Revenue is what customers paid. Subtract the cost of making the product, R&D, "
+         "sales and admin, and depreciation and amortization (D&A), and you get operating income, also called "
+         "EBIT (earnings before interest and taxes).",
+         "EBITDA adds D&A back to EBIT. D&A is an accounting charge that spreads the cost of past investment over "
+         "time; no cash leaves the company when it's booked. EBITDA is therefore a rough measure of the cash the "
+         "operations generate before taxes, financing and new investment, and it is the most-used profit measure "
+         "in banking. Stock-based compensation stays in as a real cost here (FD-1).",
+         "LTM means the last twelve months. Companies report quarterly, so to get a full, current year we take "
+         "the latest fiscal year, add this year's year-to-date and subtract last year's same year-to-date (FD-4). "
+         "Margins (EBITDA / revenue) let you compare companies of different sizes."),
+        figures=("ltm_revenue", "revenue_growth_ltm", "ltm_operating_income", "ltm_d_and_a", "ltm_ebitda",
+                 "ebitda_margin", "ltm_net_income", "ltm_sbc"),
+        questions=(
+            ("Why do bankers use EBITDA rather than net income?",
+             "EBITDA is before interest, so it doesn't depend on how the company is financed, and before D&A, so "
+             "it doesn't depend on accounting choices about asset lives. That makes companies comparable."),
+            ("What's wrong with EBITDA?",
+             "It ignores capex. A company that must keep spending heavily on equipment can have great EBITDA and "
+             "little real cash. That's why the DCF subtracts capex."),
+            ("Why use LTM instead of the last fiscal year?",
+             "It's more current: it includes the latest quarters. Valuation multiples use LTM so every company is "
+             "measured over its most recent twelve months."),
+        ),
+    ),
+    Chapter(
+        "3. What the company is worth: equity value and enterprise value",
+        ("Equity value (market cap) is the share price times the number of shares: what the stock market says "
+         "all the shares are worth today.",
+         "Enterprise value (EV) is the price of the whole business, whoever financed it. Imagine buying the "
+         "company outright: you pay the shareholders (equity value), you take on its debt, and you get its cash. "
+         "So EV = equity value + debt + preferred stock + noncontrolling interest - cash - short-term investments "
+         "(FD-2). This is the EV bridge.",
+         "Net debt is debt minus cash. Many large tech companies have negative net debt (net cash), so their EV is "
+         "below their market cap. Net debt / EBITDA measures leverage: roughly how many years of EBITDA it would "
+         "take to repay the debt."),
+        figures=("price", "shares_outstanding", "equity_value", "total_debt", "cash", "short_term_investments",
+                 "enterprise_value", "net_debt", "net_debt_ebitda"),
+        questions=(
+            ("Why add debt and subtract cash to get EV?",
+             "A buyer of the whole company takes over its debt (a cost on top of the share price) and gets its "
+             "cash (which reduces the real price paid). EV is the net price of the operating business."),
+            ("If a company raises $1bn of debt and holds it as cash, what happens to EV?",
+             "Nothing. Debt rises by $1bn and cash rises by $1bn, so they cancel. Equity value is also unchanged "
+             "if the share price doesn't move."),
+            ("Why pair EV with EBITDA but equity value with net income?",
+             "Match the claim to the profit. EBITDA is before interest, so it belongs to debt and equity holders "
+             "together, like EV. Net income is after interest, so it belongs to shareholders only, like equity "
+             "value."),
+        ),
+    ),
+    Chapter(
+        "4. Valuation multiples",
+        ("A multiple divides a value by a measure of the business. EV/EBITDA = how many years of today's EBITDA "
+         "the market pays for the whole company. EV/Revenue = what it pays per dollar of sales. P/E = equity value "
+         "/ net income, what shareholders pay per dollar of profit.",
+         "Multiples let you compare companies of different sizes. A higher multiple means the market expects "
+         "more: faster growth, better margins, or lower risk. A multiple is NM (not meaningful) when the "
+         "denominator is zero or negative, or the result is above 100x (FD-6)."),
+        figures=("ev_revenue", "ev_ebitda", "pe"),
+        questions=(
+            ("Two companies trade at 15x and 25x EBITDA. Which is cheaper?",
+             "On that number alone, the 15x. But check growth and margins first: if the 25x company grows twice "
+             "as fast, it may be the better value. 'Cheap' only means something relative to what you get."),
+            ("When would you use EV/Revenue instead of EV/EBITDA?",
+             "When EBITDA is small or negative, as in early-stage or loss-making companies, so EV/EBITDA is NM."),
+        ),
+    ),
+    Chapter(
+        "5. Trading comps: valuing a company by its peers",
+        ("Trading comps value a company by how similar companies trade. Pick peers with a similar business, size "
+         "and growth (FD-9), calculate their multiples, and summarize them: the median is the headline, the 25th "
+         "and 75th percentiles give a range. The target itself is left out of the statistics (FD-7).",
+         "Then apply the peer multiples to the target: peer EV/EBITDA x the target's LTM EBITDA = implied EV. "
+         "Walk the EV bridge backwards (subtract debt, add cash) to get implied equity value, and divide by shares "
+         "for an implied share price (FD-8). The 25th-75th range becomes a bar on the football field chart, next "
+         "to the DCF and the 52-week trading range."),
+        special="comps",
+        questions=(
+            ("Why use the median rather than the mean?",
+             "One outlier (a 90x multiple) drags the mean a long way and barely moves the median."),
+            ("What's the biggest weakness of comps?",
+             "If the whole sector is overvalued, comps say your company is fairly valued too. They measure "
+             "relative value, not absolute value. The DCF is the cross-check."),
+        ),
+    ),
+    Chapter(
+        "6. The DCF, step by step",
+        ("A discounted cash flow (DCF) values a business on the cash it will generate, not on what peers trade "
+         "at. Forecast the cash the business produces for all its investors (unlevered free cash flow) for five "
+         "years, value everything after that with a terminal value, and discount it all back to today at the "
+         "return investors require (WACC). That gives enterprise value; the EV bridge turns it into a share price.",
+         "Below is the whole calculation for this company, on the app's default assumptions: history carried "
+         "forward (FD-11). Change them on the tearsheet's DCF section; the walkthrough there follows your inputs."),
+        special="dcf",
+        questions=(
+            ("Walk me through a DCF.",
+             "Project unlevered free cash flow (EBIT less taxes, plus D&A, less capex, less the increase in working "
+             "capital) for about five years. Calculate a terminal value with a perpetuity growth rate or an exit "
+             "multiple. Discount both at WACC to get enterprise value, subtract net debt for equity value, and "
+             "divide by diluted shares for a value per share."),
+            ("Why unlevered free cash flow?",
+             "It's the cash available to both lenders and shareholders, before interest. That matches WACC, which "
+             "blends both groups' required returns, and it gives enterprise value. Debt is subtracted at the end."),
+            ("Why is the terminal value usually most of the value?",
+             "It covers every year after year 5, forever. Even discounted, that's a lot of years. It's why small "
+             "changes in WACC or terminal growth move the answer so much."),
+        ),
+    ),
+    Chapter(
+        "7. What moves a valuation",
+        ("A DCF is only as good as its assumptions, so know which ones matter. The tornado chart reruns the DCF "
+         "with each input moved one notch (1 percentage point, 0.10 for beta, 0.5 points for terminal growth) and "
+         "everything else held fixed. The longest bars are the assumptions to defend (FD-14).",
+         "Inputs reach the share price through two channels. Operating inputs (growth, margin, capex, working "
+         "capital, tax) change the cash flows. Discount-rate inputs (risk-free rate, beta, equity risk premium, "
+         "cost of debt) change WACC, which changes what every future dollar is worth today. Terminal growth "
+         "changes the terminal value only. Try a change below and see every line move."),
+        special="drivers",
+        questions=(
+            ("What happens to the DCF value if interest rates rise?",
+             "The risk-free rate rises, so the cost of equity and WACC rise, every discount factor shrinks, and "
+             "the terminal value falls (bigger denominator). Value goes down even though the cash flows didn't "
+             "change."),
+            ("Can terminal growth be higher than WACC?",
+             "No. The perpetuity formula divides by WACC - g, which would be zero or negative. In reality no "
+             "company can outgrow its cost of capital forever; terminal growth sits near long-run inflation."),
+        ),
+    ),
+    Chapter(
+        "8. From numbers to a pitch",
+        ("Put it together on the football field: the comps ranges, the DCF range and the 52-week range, with the "
+         "current price as a line. If most bars sit above the price, the stock looks undervalued; below it, "
+         "overvalued.",
+         "A good pitch says why the market is wrong and what would prove it. Use the sector screen to find a "
+         "company that trades at a discount to peers despite similar or better growth and margins. Then build its "
+         "tearsheet, check the DCF's key assumptions against its history, and know which assumption your answer "
+         "depends on.",
+         "The talking points on each page are built from these numbers by fixed templates. Check each one against "
+         "the tables before you use it, and be ready to explain any number from its Sources panel."),
+        questions=(
+            ("The DCF says $300 and comps say $200. Which is right?",
+             "Neither, on its own. The gap tells you something: either your DCF assumptions are more optimistic "
+             "than the market's, or the peers are cheap. Find which assumption drives the gap and decide whether "
+             "you believe it."),
+        ),
+    ),
+)

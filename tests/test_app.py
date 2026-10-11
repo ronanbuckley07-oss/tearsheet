@@ -11,7 +11,7 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from engine import comps
+from engine import comps, learn
 from engine.comps import CompanyRow
 from engine.periods import Figure
 from engine.report import Report
@@ -142,7 +142,9 @@ def test_learn_mode_explains_clicked_cells(app):
     app.text_input[0].set_value("T")
     app.text_area[0].set_value("A B C D E F")
     app.button[0].click().run()
-    assert app.toggle(key="learn").value is True
+    assert app.toggle(key="learn").value is False  # off by default: experienced users get a clean page
+    assert not any(e.label.startswith("Step by step") for e in app.expander)
+    app.toggle(key="learn").set_value(True).run()
     assert any(e.label.startswith("Step by step: how this DCF gets to") for e in app.expander)
     clicks = {"fin": ((0, "LTM (2026-06-30)"), "Revenue, LTM (2026-06-30)"),
               "ev": ((8, "value"), "Enterprise value"), "comps": ((0, "EV/EBITDA"), "T: EV/EBITDA"),
@@ -164,7 +166,31 @@ def test_learn_mode_explains_clicked_cells(app):
 def test_learn_mode_off_is_a_clean_page(app):
     app.text_input[0].set_value("T")
     app.button[0].click().run()
-    app.toggle(key="learn").set_value(False).run()
     assert not app.exception
-    assert not any("Learn mode: click" in c.value for c in app.caption)
+    assert not any("Click any number" in c.value for c in app.caption)
     assert not [p for p in app.get("popover")]
+
+
+def test_learn_page_walks_through_every_chapter(app):
+    app.text_input[0].set_value("T")
+    app.text_area[0].set_value("A B C D E F")
+    app.button[0].click().run()
+    app.radio(key="mode").set_value("Learn").run()
+    assert not app.exception
+    assert app.text_input(key="learn_ticker").value == "T"  # the tearsheet's company is the example
+    titles = [ch.title for ch in learn.COURSE]
+    for title in titles:
+        assert app.radio(key="learn_chapter").value == title
+        assert title in [s.value for s in app.subheader]
+        app.button(key="learn_next").click().run()
+        assert not app.exception, title
+    assert "Glossary" in [s.value for s in app.subheader]
+    app.radio(key="learn_chapter").set_value(titles[5]).run()  # the DCF: walkthrough + clickable model
+    assert any("Year 1:" in c.value for c in app.code)
+    app.session_state["click-learn-dcf"] = {"selection": {"rows": [], "columns": [], "cells": [(8, "Year 2")]}}
+    app.run()
+    assert any(m.value.startswith("**Unlevered free cash flow, year 2") for m in app.markdown)
+    app.radio(key="learn_chapter").set_value(titles[6]).run()  # what moves a valuation
+    assert any(n.label.startswith("New value") for n in app.number_input)
+    app.radio(key="mode").set_value("Company tearsheet").run()
+    assert not app.exception and app.toggle(key="learn").value is False

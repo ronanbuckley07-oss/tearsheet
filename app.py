@@ -72,11 +72,11 @@ def md(text: str) -> str:
 
 
 def learning() -> bool:
-    return bool(st.session_state.get("learn", True))
+    return bool(st.session_state.get("learn", False))
 
 
 def show(df: pd.DataFrame, label: str = "", wide: tuple[str, ...] = (), explain=None, key: str | None = None,
-         cik: int | None = None, **config) -> None:
+         cik: int | None = None, clickable: bool | None = None, **config) -> None:
     """A table tall enough to show every row, with the row label as a wide first column.
 
     In learn mode, a table given ``explain(row_position, row_label, column)`` is clickable:
@@ -88,14 +88,14 @@ def show(df: pd.DataFrame, label: str = "", wide: tuple[str, ...] = (), explain=
     cfg.update({c: st.column_config.TextColumn(c, width="large") for c in wide})
     cfg.update(config)
     height = 35 * (len(df) + 1) + 3
-    if not (explain and key and learning()):
+    if not (explain and key and (learning() if clickable is None else clickable)):
         st.dataframe(df, hide_index=True, width="stretch", column_config=cfg, height=height)
         return
     event = st.dataframe(df, hide_index=True, width="stretch", column_config=cfg, height=height,
                          on_select="rerun", selection_mode="single-cell", key=f"click-{key}")
     cells = event.selection.get("cells", []) if event is not None else []
     if not cells:
-        st.caption("Learn mode: click any number in this table to see what it means and what it moves.")
+        st.caption("Click any number in this table to see what it means and what it moves.")
         return
     row, col = cells[0]
     try:
@@ -200,7 +200,7 @@ def ripple_table(rows: list[learn.RippleRow]) -> None:
                        "change": [change(r) for r in rows]}, index=[r.line for r in rows]))
 
 
-def impact_section(d: learn.DcfContext, ctx: learn.Context) -> None:
+def impact_section(d: learn.DcfContext, ctx: learn.Context, sandbox: bool | None = None) -> None:
     """How each DCF input moves the value: tornado, a what-if, and the user's own edits vs defaults."""
     st.markdown("**What moves the value**")
     bars = learn.tornado(d)
@@ -229,7 +229,7 @@ def impact_section(d: learn.DcfContext, ctx: learn.Context) -> None:
             st.caption(md(f"{b_.label}: one step breaks the DCF (WACC falls to or below terminal growth, or "
                           "terminal cash flow turns negative), so it isn't drawn."))
 
-    if learning():
+    if learning() if sandbox is None else sandbox:
         st.markdown("**Try a change and watch everything move**")
         keys = [*dcf_mod.GROWTH_KEYS, *dcf_mod.OPERATING_KEYS, *dcf_mod.WACC_KEYS, "terminal_growth"]
         c1, c2 = st.columns([2, 1])
@@ -306,18 +306,19 @@ st.title("Tearsheet")
 st.caption("Every number comes from SEC EDGAR filings or the market price, computed in code. "
            "Open any \"Sources\" panel to trace a figure back to its filing.")
 
-COMPANY, SECTOR = "Company tearsheet", "Sector screen"
+COMPANY, SECTOR, LEARN = "Company tearsheet", "Sector screen", "Learn"
 view_col, learn_col = st.columns([3, 1])
-mode = view_col.radio("View", [COMPANY, SECTOR], horizontal=True, key="mode", label_visibility="collapsed",
+mode = view_col.radio("View", [COMPANY, SECTOR, LEARN], horizontal=True, key="mode", label_visibility="collapsed",
                       help="Sector screen: line up a whole sector, find the stock to pitch, then open it as a "
-                           "tearsheet with the rest of the sector as peers.")
-learn_col.toggle("Learn mode", value=True, key="learn",
-                 help="Explains every number: click any cell in a table, or Explain under a headline figure, to "
-                      "see what it means, this company's math, and what changes if it moves. Turn off for a "
-                      "clean page to present.")
-if learning():
-    st.caption("Learn mode is on: click any number in a table, or **Explain** under a headline figure. "
-               "The DCF section adds a step-by-step walkthrough and shows what every input moves. "
+                           "tearsheet with the rest of the sector as peers. Learn: a step-by-step course on "
+                           "what every number means and how the DCF works, using a real company.")
+if mode != LEARN:
+    learn_col.toggle("Click-to-explain", value=False, key="learn",
+                     help="Click any cell in a table, or Explain under a headline figure, to see what it means, "
+                          "this company's math, and what changes if it moves. Off by default so the page stays "
+                          "clean; the Learn view has the full course.")
+if learning() and mode != LEARN:
+    st.caption("Click-to-explain is on: click any number in a table, or **Explain** under a headline figure. "
                "All explanations are fixed templates filled with this company's computed numbers, not AI text.")
 
 
@@ -540,6 +541,137 @@ def render_sector() -> None:
     st.button(f"Open {pick} as a full tearsheet (rest of the screen as peers)", type="primary",
               on_click=open_tearsheet, args=(pick, [r.ticker for r in rows]))
 
+
+def show_steps(steps: list[learn.Step]) -> None:
+    for step in steps:
+        st.markdown(md(f"**{step.title}**  \n{step.text}"))
+        if step.math:
+            st.code("\n".join(step.math), language=None, wrap_lines=True)
+
+
+def render_learn() -> None:
+    """A course on the tearsheet and the DCF, on its own page, illustrated with a real company."""
+    st.header("Learn: how a tearsheet and a DCF work")
+    st.markdown("A short course, one chapter at a time. Each chapter explains the idea, then shows it on a real "
+                "company's numbers from its SEC filings, then asks the questions an interviewer would. "
+                "Nothing here changes your tearsheet.")
+    c1, c2 = st.columns([1, 3])
+    default = st.session_state.get("target") or "NVDA"
+    ticker = c1.text_input("Example company (ticker)", value=default, key="learn_ticker").strip().upper()
+    if ticker == st.session_state.get("target") and st.session_state.get("peers_text"):
+        peers = parse_peers(st.session_state["peers_text"])
+        c2.caption(md(f"Peers: your tearsheet's list ({', '.join(peers)})."))
+    else:
+        home = sector_of(ticker)
+        peers = [p for p in SECTORS.get(home, []) if p != ticker]
+        c2.caption(md(f"Peers: the starter list \"{home}\"." if home else
+                      "No starter peer list for this ticker, so the comps chapter will be empty. Build its "
+                      "tearsheet with peers first, then come back."))
+
+    names = [ch.title for ch in learn.COURSE] + ["Glossary: every term"]
+    nav, body = st.columns([1, 3], gap="large")
+    pick = nav.radio("Chapter", names, key="learn_chapter")
+    i = names.index(pick)
+
+    def go(j: int) -> None:
+        st.session_state["learn_chapter"] = names[j]
+
+    with body:
+        if i == len(learn.COURSE):
+            st.subheader("Glossary")
+            for key, c_ in learn.CONCEPTS.items():
+                with st.expander(c_.title):
+                    st.markdown(md(f"**What it is.** {c_.what}"))
+                    st.markdown(md(f"**What moves it.** {c_.drivers}"))
+                    st.markdown(md(f"**What it moves.** {c_.feeds}"))
+        else:
+            ch = learn.COURSE[i]
+            st.subheader(ch.title)
+            for para in ch.intro:
+                st.markdown(md(para))
+            if ch.figures or ch.special:
+                learn_examples(ch, ticker, peers)
+            if ch.questions:
+                st.markdown("**Check yourself**")
+                for q, a in ch.questions:
+                    with st.expander(q):
+                        st.markdown(md(a))
+        b1, _, b2 = st.columns([1, 2, 1])
+        if i > 0:
+            b1.button(f"← {names[i - 1]}", on_click=go, args=(i - 1,), width="stretch", key="learn_prev")
+        if i < len(names) - 1:
+            b2.button(f"{names[i + 1]} →", on_click=go, args=(i + 1,), width="stretch", key="learn_next",
+                      type="primary")
+
+
+def learn_examples(ch: learn.Chapter, ticker: str, peers: list[str]) -> None:
+    """The chapter's worked examples, on the example company's real numbers."""
+    if not ticker:
+        st.info("Type a ticker above to see these ideas on a real company.")
+        return
+    try:
+        with st.spinner(f"Pulling {ticker}'s filings and prices..."):
+            rep_ = load(ticker, tuple(peers))
+    except SECConfigError as exc:
+        st.error(str(exc))
+        return
+    t_ = rep_.target
+    if t_.metrics is None:
+        st.warning(f"{ticker}: {t_.error}")
+        return
+    m_ = t_.metrics
+    ctx_ = learn.Context(t_.name, t_.ticker, m_, peer_stats=rep_.comps.stats)
+    st.markdown(md(f"**On {t_.name} ({t_.ticker})**, LTM through {m_.ltm_end}:"))
+    for n, key in enumerate(ch.figures):
+        e = learn.explain_figure(key, m_.figures[key], ctx_)
+        with st.expander(f"{e.title}: {e.value}", expanded=n == 0):
+            explain_card(e, t_.cik, border=False)
+    if ch.special == "comps":
+        c_ = rep_.comps
+        if not c_.peers:
+            st.info("No peers loaded for this company, so there is nothing to compare against.")
+            return
+        s_ = c_.stats.get("ev_ebitda")
+        if s_ and s_.n:
+            e = learn.explain_peer_stat("ev_ebitda", "median", s_.median, s_, ctx_, "EV/EBITDA")
+            with st.expander(f"Peer EV/EBITDA: median {e.value}", expanded=True):
+                explain_card(e, border=False)
+        for key, r in c_.implied.items():
+            for point, name in ((0, "25th percentile"), (1, "median"), (2, "75th percentile")):
+                e = learn.explain_implied(r, point, ctx_, LABELS[key])
+                with st.expander(f"{LABELS[key]} at the peer {name}: {e.value}", expanded=key == "ev_ebitda" and
+                                 point == 1):
+                    explain_card(e, t_.cik, border=False)
+        return
+    if ch.special in ("dcf", "drivers"):
+        b_ = rep_.dcf_base
+        if b_ is None:
+            st.info("The DCF needs this company's filings, which didn't load.")
+            return
+        a_ = dcf_mod.default_assumptions(b_, m_)
+        res_ = dcf_mod.run(a_, m_, b_, False, steady_state=True)
+        d_ = learn.DcfContext(res_, a_, a_, m_, b_, False, True)
+        ctx_.dcf = d_
+        if ch.special == "dcf":
+            show_steps(learn.walkthrough(d_, ctx_))
+            if not res_.reason:
+                st.markdown("**Click any number in the model to see that cell's arithmetic**")
+                years = [f"Year {y.n}" for y in res_.years]
+                lines = {row: [getattr(y, attr) for y in res_.years] for row, (_, attr) in learn.DCF_ROWS.items()}
+                cell = {"growth": learn.pct, "period": lambda v: f"{v:g}", "discount_factor": lambda v: f"{v:.3f}"}
+                table = pd.DataFrame({row: [cell.get(attr, learn.money)(v) for v in lines[row]]
+                                      for row, (_, attr) in learn.DCF_ROWS.items()}, index=years).T
+                show(table, explain=lambda r, label, col: learn.explain_dcf_cell(label, col, d_, ctx_),
+                     key="learn-dcf", cik=t_.cik, clickable=True)
+        elif res_.reason:
+            st.warning(md(f"The DCF can't run on the defaults: {res_.reason}"))
+        else:
+            impact_section(d_, ctx_, sandbox=True)
+
+
+if mode == LEARN:
+    render_learn()
+    st.stop()
 
 if mode == SECTOR:
     render_sector()
@@ -912,12 +1044,9 @@ else:
              else f"{res.implied_exit_multiple:.1f}x", learn.explain_dcf_output("implied_exit", dctx, ctx), t.cik,
              help="Terminal value / year-5 EBITDA. Compare it with the peer EV/EBITDA multiples.")
 
-        with st.expander(f"Step by step: how this DCF gets to {fmt(res.share_price)} per share",
-                         expanded=learning()):
-            for step in learn.walkthrough(dctx, ctx):
-                st.markdown(md(f"**{step.title}**  \n{step.text}"))
-                if step.math:
-                    st.code("\n".join(step.math), language=None, wrap_lines=True)
+        if learning():
+            with st.expander(f"Step by step: how this DCF gets to {fmt(res.share_price)} per share"):
+                show_steps(learn.walkthrough(dctx, ctx))
 
         for n in res.notes:
             st.caption(md(f"Check: {n}"))

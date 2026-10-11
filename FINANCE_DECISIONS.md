@@ -180,7 +180,7 @@ Why it matters: a DCF you can present has to survive "what if growth is lower?" 
 
 FD-14. Learn mode: explanations and "what moves" numbers
 
-Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/learn.py; the app's "Learn mode" toggle (on by default) shows it.
+Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/learn.py; shown on the app's separate Learn view (course chapters, engine/learn.py COURSE) and, on the tearsheet, behind the "Click-to-explain" toggle (off by default so experienced users get a clean page).
 
 - Explanations are fixed templates (engine/learn.py CONCEPTS) filled with figures the engine already computed. No LLM writes them (CLAUDE.md rule 1). A template sentence that needs an n/a or NM figure is dropped, never estimated (rule 3).
 - Every "if it changes" number is a rerun of the real DCF (engine/dcf.run) on a copy of the assumptions, with everything else held fixed. Nothing in learn mode changes the valuation shown on the page.
