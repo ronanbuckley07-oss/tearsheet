@@ -13,7 +13,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # then fill in your name and email (the SEC requires them)
 pytest                 # offline unit tests
-RUN_LIVE=1 pytest -m live   # optional: one real request to SEC EDGAR
+RUN_LIVE=1 pytest -m live   # optional: tests against real SEC EDGAR (and Yahoo Finance) data
 streamlit run app.py
 ```
 
@@ -28,6 +28,13 @@ Phases 0 to 3 are done: the data layer, LTM periods, EBITDA, the EV bridge and m
 - Learn (Phase 4d): a separate "Learn" view at the top is an 8-chapter course (income statement, EV bridge, multiples, comps, the DCF step by step, what moves a valuation, pitching, plus a glossary), each chapter illustrated on a real company's filings with interview-style check questions. "Deep learn mode" opens every chapter into tabs at investment banking interview depth (three-statement walks, TSM dilution, unlevering beta, terminal value methods, accretion/dilution, LBO returns), each tab ending in practice questions with click-to-reveal answers (engine/interview.py). On the tearsheet itself, the "Click-to-explain" toggle (off by default) lets you click any number in a table, or "Explain" under a headline figure, to see what it means, the arithmetic in this company's numbers, what drives it, what it feeds and the filings behind it. The DCF adds a step-by-step walkthrough, a tornado chart of which inputs move the value most, a "try a change" sandbox that shows every downstream line before and after, and a before/after of your own edits. All of it is templates and DCF reruns (FD-14), no AI text.
 - Exports: both views have "Download Excel" (numbers in $m, summary rows as live MEDIAN / QUARTILE.INC formulas, a Sources sheet with the XBRL facts behind every figure) and "Download PowerPoint" (16:9 slides with editable native tables and charts: overview and talking points, financial summary, comps, football field, DCF; or the sector overview, comps, rankings and scatter).
 - Speed: companies load in parallel (the SEC rate limit is still shared across threads), prices are cached for 15 minutes per ticker, and SEC responses are cached on disk for a day, so a 12-company sector loads in a few seconds and re-screening is near instant.
+
+Phase 4e (pitch-competition workflow, `SPEC.md`) is built:
+
+- Pitch workflow, start to finish: Sector screen -> filter it (size, growth, margin) or switch to percentile ranks -> check who sits below the valuation-vs-growth line -> in "Pitch builder" pick the target and open it with the FD-9 size-band peers -> read "Thesis support" -> "Download pitch deck". Measured on the real 12-company semiconductor screen: 3.7s with an empty SEC cache, about 1s warm, and under 1s to open the target as a tearsheet.
+- Pitch deck: one PowerPoint in the order judges expect (title with a recommendation placeholder, valuation at a glance, sector context with the target highlighted, company profile and financials, scorecard vs peers, comps, DCF and what moves it, football field, methodology). The recommendation and thesis are left for the team to write; every number on the slides is computed.
+- Thesis support (FD-16): where the target sits against its peers on growth, margin, leverage and each multiple, warnings when its growth or margin sits outside the peers' (the peer multiple then needs defending), and upside/downside by method with a flag when methods disagree. The deck and Excel carry the DCF's "what moves the value" tornado (FD-14) too.
+- Peers from SEC data (FD-15): "Peer set check" shows each peer's market cap against the target and trims to the 0.25x-4x band in one click; "Suggest peers from the SEC industry code" and "Build a list from an SEC industry (SIC) code" find US-listed 10-K filers by SIC code, sized by revenue from the SEC's XBRL frames.
 - `python scripts/inspect_ticker.py AAPL`: raw extracted series with sources
 - `python scripts/inspect_metrics.py AAPL --sources`: LTM figures, EV bridge and multiples, each with its formula and the filings behind it
 - `python scripts/run_comps.py NVDA AMD AVGO QCOM TXN`: comps table, peer stats and implied share price range

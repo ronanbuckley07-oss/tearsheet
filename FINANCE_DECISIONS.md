@@ -158,6 +158,11 @@ Decided by Claude 2026-10-10 (owner's delegation). Implemented in engine/sector.
 - Talking points (engine/pitch.py) are fixed sentence templates over these numbers; a sentence is dropped when a number it needs is NM or n/a. No LLM is involved (CLAUDE.md rule 1).
 - Starter sector lists (engine/presets.py) are a starting point for FD-9, not a peer selection. Banks, insurers and REITs are left out because EV/EBITDA doesn't describe them.
 
+- Screening tools (added 2026-10-10, Phase 4e):
+  - Percentile rank = companies with a lower value / (usable values - 1), Excel PERCENTRANK.INC (ties share the lower rank; 0% = lowest, 100% = highest). Same spreadsheet-reproducible choice as FD-10 Q11. NM/n/a values get no rank.
+  - Gap to the fitted line = actual multiple - the line's prediction at the company's growth (or margin), in turns, and as actual / predicted - 1. Negative = cheaper than peers with the same growth. It is a screen, not a valuation: no implied price. When R² < 0.2 the line explains little, so the gaps are shown with a warning and the "furthest below the line" talking point is dropped (it also needs 5+ companies). One extreme point can flatten the line (MU's 256% growth in the October 2026 semiconductor screen gave R² = 0.00), so the chart should always be checked first.
+  - Filters (min/max market cap, min growth, min margin) re-slice companies already loaded and recompute every statistic over the survivors. A company whose value on a filtered column is NM or n/a is dropped, since it can't be shown to pass.
+
 Why it matters: a pitch starts with the sector. Lining up who trades where, and against what growth and margins, is how you find a stock that looks mispriced and how you defend the peer set you then use for its comps.
 
 ---
@@ -190,3 +195,36 @@ Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/learn.p
 - Comps rules of thumb are exact arithmetic on the current figures: each 1.0x of multiple = the target's LTM metric of EV, divided by cover-page shares for the per-share figure; each $1bn of debt or cash = $1bn / shares per share.
 
 Why it matters: the owner has to explain every number in an interview. Seeing the arithmetic in the company's own numbers, and which inputs actually move the answer, teaches the mechanics faster than the formulas alone.
+
+---
+
+FD-15. Peer tools from SEC data (FD-9 size check, SIC-code candidates)
+
+Decided by Claude 2026-10-10 (owner's delegation), Phase 4e. Implemented in engine/peers.py. No LLM; the Phase 5 LLM suggestions will go through the same validation.
+
+- Size check on a loaded peer list. Peer market cap / target market cap; inside 0.25x-4x (inclusive) passes FD-9. A peer whose market cap is n/a can't be shown to pass and is not kept by "keep only the size band". The pitch builder offers the size-band peers as the default; the whole screen stays one click away.
+- SIC-code candidates. Companies come from EDGAR's company search by SIC code (paged, up to 1,000 per code), kept only if they appear in company_tickers.json (one ticker per company: the first listed, its primary class), then sized by revenue from the SEC XBRL frames API, which returns every filer's value for one tag and calendar year in one request.
+  - Revenue tag order: RevenueFromContractWithCustomerExcludingAssessedTax, then Revenues, then RevenueFromContractWithCustomerIncludingAssessedTax (the SPEC chain; SalesRevenueNet left out because it was retired with ASC 606). The first tag a company reports wins, as in the per-period chain. The third tag matters: Old Dominion, J.B. Hunt, Akamai and Rambus report only it.
+  - If a company's tags disagree by more than 10x, one is mis-scaled (Tigo Energy's FY2025 10-K tags $103.5m once as $103.5bn). Its revenue is shown with the conflict and not used for sizing.
+  - Year: the latest calendar year most 10-Ks cover: the prior year from April onward, the year before that until then (December filers' 10-Ks are due by late March). Frames place a non-December fiscal year in the calendar year it mostly overlaps.
+  - Size band for candidates: revenue within 0.25x-4x of the target's revenue in the same frame. This is a proxy for the FD-9 market-cap band, used only because pricing hundreds of companies isn't practical; the comps page re-checks market cap once prices load. Revenue understates the size of high-multiple companies and overstates low-margin ones, which is why the proxy only shortlists.
+  - Order: in-band candidates by closeness in size (|log of the revenue ratio|), then the rest by closeness, then unsized ones, so a very large or small target still gets a list. Each shortlisted company is checked for filing 10-Ks; 20-F filers that report in US GAAP (Alibaba) appear in frames and are dropped with a note.
+  - A sector list from a SIC code takes the largest 10-K filers by revenue (default 12), for screens the starter lists don't cover.
+
+Why it matters: SIC codes describe products, not business models (Qualcomm is SIC 3663, "radio & TV equipment", not semiconductors; Uber's 7389 also holds Accenture and Mastercard), so these lists are candidates the user prunes, never a peer set. The size test is the one a judge applies by eye: QCOM ($184bn) against NVDA ($5.5tn, 30x) and AVGO (9x) is a comparison of different businesses. In the October 2026 semiconductor screen only 5 of 11 peers passed for QCOM, and the peer median EV/EBITDA moved from 29.0x to 29.6x while the 25th-75th range narrowed and shifted up (22.7x-33.5x to 28.4x-45.9x).
+
+---
+
+FD-16. Thesis support (scorecard, valuation summary)
+
+Decided by Claude 2026-10-10 (owner's delegation), Phase 4e. Implemented in engine/thesis.py. Every output is computed from figures already on the page; nothing is estimated.
+
+- Scorecard rows: revenue growth, EBITDA margin, net debt / EBITDA, EV/EBITDA, EV/Revenue, P/E, each against the peer 25th percentile, median and 75th percentile (FD-7, target excluded).
+- Notable = outside the peer interquartile range; inside = "in line". The IQR is the band FD-8 already uses as "typical", so the scorecard and the implied range agree on what counts as unusual.
+- Direction for a long: higher growth and margin are stronger; lower leverage is safer; lower multiples are cheaper. A notable reading in the favorable direction is labeled "long", the other "short". Distance from the 52-week high is left out because it reads as value or as momentum depending on the thesis. These are conventions for organizing evidence, not a recommendation: the deck leaves the recommendation for the team to write.
+- Rank = share of peers below the target among peers + target (PERCENTRANK.INC, as FD-12).
+- Comparability warnings: the target's growth or margin outside every peer's value (the peers' multiples price a different business) or outside the peer IQR (the median multiple may over- or understate it). These are the cases where a judge asks why the peers' multiples apply.
+- Upside = implied price / current price - 1, for the low, mid and high of each method: comps EV/EBITDA and EV/Revenue (FD-8, mid = peer median), DCF (low/high = the football field bar corners, mid = the base case), and the 52-week range (no midpoint: it isn't a valuation). Methods are not averaged or weighted into one target price; that weighting is the team's argument to make.
+- When method midpoints sit on both sides of the current price, a note says so. Example (QCOM, October 2026): comps imply +84% to +222% at the peer median while the history-based DCF implies -51%, because QCOM grows 1.9% against size-band peers at 7.5%-33.6%.
+
+Why it matters: judges test whether the numbers support the call, and the first questions are predictable: how does it compare, how much upside on which method, why those peers, and what assumption drives the DCF. Computing those answers from the same figures as the tables keeps the pitch consistent and checkable.
