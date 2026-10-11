@@ -175,3 +175,18 @@ Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/dcf_wor
 - Football field on the Cover. DCF bars use the sensitivity corners (WACC +/-1%, g +/-0.5%, as FD-11; exit +/-1.0x); comps bars are the FD-8 25th-75th percentile ranges and the 52-week range, as values from the app.
 
 Why it matters: a DCF you can present has to survive "what if growth is lower?" in the room. A live model lets you change one blue cell and show the answer, and the colour code tells the reader which numbers are judgment and which are arithmetic.
+
+---
+
+FD-14. Learn mode: explanations and "what moves" numbers
+
+Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/learn.py; the app's "Learn mode" toggle (on by default) shows it.
+
+- Explanations are fixed templates (engine/learn.py CONCEPTS) filled with figures the engine already computed. No LLM writes them (CLAUDE.md rule 1). A template sentence that needs an n/a or NM figure is dropped, never estimated (rule 3).
+- Every "if it changes" number is a rerun of the real DCF (engine/dcf.run) on a copy of the assumptions, with everything else held fixed. Nothing in learn mode changes the valuation shown on the page.
+- Standard step for the tornado chart and the "raise it / lower it" lines: 1 percentage point for every % input (each growth year, EBIT margin, capex, NWC, tax, risk-free, ERP, cost of debt), 0.10 for beta, 0.5 points for terminal growth (matching the sensitivity table's step). The revenue growth bar moves all five years together. One shared unit makes the bars comparable; the trade-off is that 1 point is a bigger move for a small input (a 1.4% cost of debt) than a large one (a 60% EBIT margin), which the bar labels state.
+- A step that breaks the DCF (WACC at or below terminal growth, negative terminal cash flow) is reported as breaking it, not drawn.
+- "What your edits did" compares the current assumptions with the FD-11 defaults on the same toggles (mid-year, steady state).
+- Comps rules of thumb are exact arithmetic on the current figures: each 1.0x of multiple = the target's LTM metric of EV, divided by cover-page shares for the per-share figure; each $1bn of debt or cash = $1bn / shares per share.
+
+Why it matters: the owner has to explain every number in an interview. Seeing the arithmetic in the company's own numbers, and which inputs actually move the answer, teaches the mechanics faster than the formulas alone.

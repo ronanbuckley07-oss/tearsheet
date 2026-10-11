@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine import dcf as dcf_mod
-from engine import dcf_workbook, export, market, pitch
+from engine import dcf_workbook, export, learn, market, pitch
 from engine import report as report_mod
 from engine import sector as sector_mod
 from engine.comps import CONTEXT, MULTIPLES, VALUATION_BASES
@@ -71,14 +71,78 @@ def md(text: str) -> str:
     return text.replace("$", "\\$")
 
 
-def show(df: pd.DataFrame, label: str = "", wide: tuple[str, ...] = (), **config) -> None:
-    """A table tall enough to show every row, with the row label as a wide first column."""
+def learning() -> bool:
+    return bool(st.session_state.get("learn", True))
+
+
+def show(df: pd.DataFrame, label: str = "", wide: tuple[str, ...] = (), explain=None, key: str | None = None,
+         cik: int | None = None, **config) -> None:
+    """A table tall enough to show every row, with the row label as a wide first column.
+
+    In learn mode, a table given ``explain(row_position, row_label, column)`` is clickable:
+    clicking a cell shows what that number means, how it was calculated and what it moves.
+    """
+    labels = list(df.index) if label is not None else [None] * len(df)
     df = df.reset_index(names=label) if label is not None else df
     cfg = {label: st.column_config.TextColumn(label, width=290, pinned=True)} if label is not None else {}
     cfg.update({c: st.column_config.TextColumn(c, width="large") for c in wide})
     cfg.update(config)
-    st.dataframe(df, hide_index=True, width="stretch", column_config=cfg,
-                 height=35 * (len(df) + 1) + 3)
+    height = 35 * (len(df) + 1) + 3
+    if not (explain and key and learning()):
+        st.dataframe(df, hide_index=True, width="stretch", column_config=cfg, height=height)
+        return
+    event = st.dataframe(df, hide_index=True, width="stretch", column_config=cfg, height=height,
+                         on_select="rerun", selection_mode="single-cell", key=f"click-{key}")
+    cells = event.selection.get("cells", []) if event is not None else []
+    if not cells:
+        st.caption("Learn mode: click any number in this table to see what it means and what it moves.")
+        return
+    row, col = cells[0]
+    try:
+        e = explain(row, labels[row], col)
+    except Exception as exc:  # a teaching card must never take the page down
+        e = None
+        st.caption(f"No explanation for that cell ({type(exc).__name__}).")
+    if e is not None:
+        explain_card(e, cik)
+
+
+def explain_card(e: learn.Explanation, cik: int | None = None, border: bool = True) -> None:
+    """One number, explained: meaning, this company's numbers, the math, what moves it, sources."""
+    with st.container(border=border):
+        st.markdown(md(f"**{e.title}**" + (f" · {e.value}" if e.value else "")))
+        st.markdown(md(f"**What it is.** {e.what}"))
+        for line in e.here:
+            st.markdown(md(f"- {line}"))
+        if e.calc:
+            st.markdown("**How it's calculated here**")
+            st.code(e.calc, language=None, wrap_lines=True)
+        if e.drivers:
+            st.markdown(md(f"**What moves it.** {e.drivers}"))
+        if e.feeds:
+            st.markdown(md(f"**What it moves.** {e.feeds}"))
+        if e.impact:
+            st.markdown("**If it changes**")
+            for line in e.impact:
+                st.markdown(md(f"- {line}"))
+        f = e.figure
+        if f is not None and f.ok:
+            rows = fact_rows(f, e.cik or cik)
+            if rows:
+                st.caption(f"Source filings ({len(rows)} XBRL fact(s); full trail in the Sources panel):")
+                st.dataframe(pd.DataFrame(rows)[["", "tag", "period", "form", "filed", "link"]], hide_index=True,
+                             width="stretch",
+                             column_config={"link": st.column_config.LinkColumn("filing", display_text="open")})
+            for s in other_sources(f):
+                st.caption(md(s))
+
+
+def tile(col, label: str, value: str, e: learn.Explanation | None, cik: int | None = None, **kw) -> None:
+    """A metric tile; in learn mode it gets an Explain button that opens the explanation."""
+    col.metric(label, value, **kw)
+    if e is not None and learning():
+        with col.popover("Explain", icon=":material/school:", width="stretch"):
+            explain_card(e, cik, border=False)
 
 
 def why(f: Figure | None) -> str:
@@ -115,6 +179,89 @@ def sources_panel(title: str, figures: dict[str, Figure], cik: int | None, key: 
                 st.markdown(md(f"- {n}"))
         if not rows and not other_sources(f):
             st.caption("No source facts (the value is n/a or NM; the reason is shown above).")
+
+
+def ripple_table(rows: list[learn.RippleRow]) -> None:
+    def cell(v, unit):
+        if v is None:
+            return "n/a"
+        return fmt(Figure("", v, unit, "")) if unit != "ratio" else f"{v:.1%}"
+
+    def change(r: learn.RippleRow) -> str:
+        if r.change is None:
+            return ""
+        if r.unchanged:
+            return "no change"
+        out = learn.signed(r.change, r.unit)
+        return out + (f" ({r.change_pct:+.1%})" if r.change_pct is not None else "")
+
+    show(pd.DataFrame({"before": [cell(r.before, r.unit) for r in rows],
+                       "after": [cell(r.after, r.unit) for r in rows],
+                       "change": [change(r) for r in rows]}, index=[r.line for r in rows]))
+
+
+def impact_section(d: learn.DcfContext, ctx: learn.Context) -> None:
+    """How each DCF input moves the value: tornado, a what-if, and the user's own edits vs defaults."""
+    st.markdown("**What moves the value**")
+    bars = learn.tornado(d)
+    usable = [b_ for b_ in bars if b_.low is not None and b_.high is not None]
+    base = d.result.share_price.value
+    if usable:
+        fig = go.Figure()
+        labels = [f"{b_.label} ({b_.step})" for b_ in reversed(usable)]
+        for name, attr, color in (("Input lowered", "low", ORANGE), ("Input raised", "high", BLUE)):
+            vals = [getattr(b_, attr) for b_ in reversed(usable)]
+            fig.add_bar(name=name, y=labels, x=[v - base for v in vals], base=base, orientation="h",
+                        marker_color=color, marker_line_width=0,
+                        text=[f"${v:,.0f}" for v in vals], textposition="outside", cliponaxis=False,
+                        hovertemplate="%{y}: $%{text}<extra>" + name + "</extra>")
+        fig.add_vline(x=base, line_width=1, line_color=GRAY,
+                      annotation_text=f"Base ${base:,.2f}", annotation_position="top")
+        fig.update_layout(barmode="overlay", height=90 + 38 * len(usable), margin=dict(l=10, r=50, t=40, b=10),
+                          xaxis_title="DCF share price (USD)", xaxis_tickprefix="$",
+                          legend=dict(orientation="h", y=-0.15, x=0))
+        st.plotly_chart(fig, width="stretch", theme="streamlit")
+        st.caption("Each bar reruns the full DCF with one input moved one step down (orange) and up (blue), "
+                   "everything else held fixed: 1 percentage point for % inputs, 0.10 for beta, 0.5 points for "
+                   "terminal growth (FD-14). Longest bar = the assumption to defend first.")
+    for b_ in bars:
+        if b_ not in usable:
+            st.caption(md(f"{b_.label}: one step breaks the DCF (WACC falls to or below terminal growth, or "
+                          "terminal cash flow turns negative), so it isn't drawn."))
+
+    if learning():
+        st.markdown("**Try a change and watch everything move**")
+        keys = [*dcf_mod.GROWTH_KEYS, *dcf_mod.OPERATING_KEYS, *dcf_mod.WACC_KEYS, "terminal_growth"]
+        c1, c2 = st.columns([2, 1])
+        k = c1.selectbox("Input", [k_ for k_ in keys if d.assumptions[k_].ok], key=f"whatif-key-{ctx.ticker}",
+                         format_func=lambda k_: dcf_mod.LABELS[k_])
+        cur = d.assumptions[k].value
+        is_x = dcf_mod.UNITS[k] == "x"
+        step = learn.step_for(k)
+        new = c2.number_input(f"New value{'' if is_x else ' (%)'}",
+                              value=round(cur + step if is_x else (cur + step) * 100, 2),
+                              step=0.05 if is_x else 0.25, format="%.2f", key=f"whatif-val-{ctx.ticker}-{k}")
+        new_v = new if is_x else new / 100
+        after = learn.run_with(d, {k: new_v})
+        st.caption(md(f"How it flows: {learn.chain(k)}"))
+        if after.reason:
+            st.warning(md(f"At that value the DCF stops working: {after.reason}"))
+        else:
+            ripple_table(learn.ripple(d.result, after, ctx.m))
+            st.caption("This is a sandbox: the boxes above keep your current assumptions. Type the value into the "
+                       "box above to keep it.")
+
+    changed = learn.changed_keys(d)
+    if changed:
+        st.markdown("**What your edits did** (your assumptions vs the defaults)")
+        st.caption(md("Changed: " + "; ".join(
+            f"{dcf_mod.LABELS[k_]} {learn.value_text(d.defaults[k_])} → {learn.value_text(d.assumptions[k_])}"
+            for k_ in changed)))
+        before = learn.defaults_result(d)
+        if before.reason:
+            st.caption(md(f"The defaults don't produce a DCF ({before.reason}), so there is nothing to compare."))
+        else:
+            ripple_table(learn.ripple(before, d.result, ctx.m))
 
 
 # Market data is cached per ticker, so changing a peer list or opening a company from the
@@ -160,9 +307,18 @@ st.caption("Every number comes from SEC EDGAR filings or the market price, compu
            "Open any \"Sources\" panel to trace a figure back to its filing.")
 
 COMPANY, SECTOR = "Company tearsheet", "Sector screen"
-mode = st.radio("View", [COMPANY, SECTOR], horizontal=True, key="mode", label_visibility="collapsed",
-                help="Sector screen: line up a whole sector, find the stock to pitch, then open it as a "
-                     "tearsheet with the rest of the sector as peers.")
+view_col, learn_col = st.columns([3, 1])
+mode = view_col.radio("View", [COMPANY, SECTOR], horizontal=True, key="mode", label_visibility="collapsed",
+                      help="Sector screen: line up a whole sector, find the stock to pitch, then open it as a "
+                           "tearsheet with the rest of the sector as peers.")
+learn_col.toggle("Learn mode", value=True, key="learn",
+                 help="Explains every number: click any cell in a table, or Explain under a headline figure, to "
+                      "see what it means, this company's math, and what changes if it moves. Turn off for a "
+                      "clean page to present.")
+if learning():
+    st.caption("Learn mode is on: click any number in a table, or **Explain** under a headline figure. "
+               "The DCF section adds a step-by-step walkthrough and shows what every input moves. "
+               "All explanations are fixed templates filled with this company's computed numbers, not AI text.")
 
 
 def open_tearsheet(ticker: str, tickers: list[str]) -> None:
@@ -269,8 +425,39 @@ def render_sector() -> None:
         cfg[f"{sector_mod.LABELS[k]} vs median"] = st.column_config.NumberColumn(
             f"{sector_mod.LABELS[k]} vs median", format="%+.0f%%",
             help="Premium (+) or discount (-) to the sector median (FD-12).")
-    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch", column_config=cfg,
-                 height=35 * (len(table) + 1) + 3)
+    by_label = {sector_mod.LABELS[k]: k for k in sector_mod.COLUMNS}
+    by_label.update({f"{sector_mod.LABELS[k]} vs median": k for k in sector_mod.RELATIVE})
+
+    def explain_sector(i: int, _label, col: str):
+        key = by_label.get(col)
+        if i >= len(rows):  # a statistics row
+            stat = table[i]["Company"].removeprefix("Sector: ")
+            if key is None:
+                return None
+            c_ = learn.CONCEPTS[learn.FIGURE_CONCEPT[key]]
+            e = learn.Explanation(f"Sector {stat}: {sector_mod.LABELS[key]}", "", c_.what, drivers=c_.drivers,
+                                  feeds=c_.feeds)
+            s_ = sec.stats[key]
+            e.here = [f"Over {s_.n} companies with a usable value: {', '.join(s_.included)}."] + [
+                f"Left out: {tk} ({why_})." for tk, why_ in s_.excluded]
+            return e
+        r = rows[i]
+        ctx = learn.Context(r.name, r.ticker, r.metrics, peer_stats=sec.stats)
+        if key is None:
+            return learn.Explanation(f"{r.name} ({r.ticker})", "", "One company in the screen. Click its numbers "
+                                     "to see what each means, or open it as a full tearsheet below.")
+        e = learn.explain_figure(key, r.get(key), ctx, f"{r.ticker}: {sector_mod.LABELS[key]}")
+        e.cik = r.cik
+        if col.endswith("vs median"):
+            rel = sec.relative[r.ticker][key]
+            e.title, e.value = f"{r.ticker}: {col}", "n/a" if not rel.ok else f"{rel.value:+.0%}"
+            e.calc = rel.formula if rel.ok else None
+            e.here.insert(0, "Premium (+) or discount (-) to the sector median: the company's multiple / the "
+                             "median - 1 (FD-12). A discount can mean cheap, or that the market expects less growth "
+                             "or lower margins: check those columns before calling it cheap.")
+        return e
+
+    show(pd.DataFrame(table), label=None, explain=explain_sector, key="sector-table", **cfg)
     st.caption("Click a column header to sort. None = NM or n/a; every reason is listed under Footnotes. "
                "Statistics use every company with a usable value (FD-12; NM rules as FD-6/FD-7).")
     foot = list(sec.notes)
@@ -404,6 +591,7 @@ if t.metrics is None:
 
 m = t.metrics
 F = m.figures
+ctx = learn.Context(t.name, t.ticker, m, peer_stats=rep.comps.stats)
 
 # ---- snapshot -----------------------------------------------------------------------------
 
@@ -414,11 +602,12 @@ st.caption(f"{t.sic_description or 'Industry n/a'} · Fiscal year ends {fye} (mo
            f"LTM through {m.ltm_end} · Latest filing {t.latest_filing}")
 
 cols = st.columns(6)
+tile_keys = ["price", "equity_value", "enterprise_value", "ltm_revenue", "ev_ebitda", "ebitda_margin"]
 tiles = [("Share price", F["price"]), ("Equity value", F["equity_value"]),
          ("Enterprise value", F["enterprise_value"]), ("LTM revenue", F["ltm_revenue"]),
          ("EV/EBITDA (LTM)", F["ev_ebitda"]), ("EBITDA margin (LTM)", F["ebitda_margin"])]
-for col, (label, f) in zip(cols, tiles):
-    col.metric(label, fmt(f), help=why(f) or f.formula)
+for col, k, (label, f) in zip(cols, tile_keys, tiles):
+    tile(col, label, fmt(f), learn.explain_figure(k, f, ctx, label), t.cik, help=why(f) or f.formula)
 if t.low_52w and t.low_52w.ok:
     st.caption(md(f"52-week range {fmt(t.low_52w)} to {fmt(t.high_52w)} · price as of {F['price'].as_of}"))
 sources_panel("snapshot", {label: f for label, f in tiles}, t.cik, "snap")
@@ -438,7 +627,25 @@ rows = [("Revenue", "revenue"), ("Operating income (EBIT)", "operating_income"),
         ("Stock-based comp (not added back)", "sbc")]
 table = pd.DataFrame({p: [fmt(d.get(k)) for _, k in rows] for p, d in periods},
                      index=[r for r, _ in rows])
-show(table)
+
+
+def explain_financials(i: int, label: str, col: str):
+    key = rows[i][1]
+    d = dict(periods).get(col)
+    if d is None:  # the row label itself
+        c_ = learn.CONCEPTS[learn.FIGURE_CONCEPT[key]]
+        return learn.Explanation(label, "", c_.what, drivers=c_.drivers, feeds=c_.feeds)
+    if col.startswith("LTM"):
+        key = {"revenue": "ltm_revenue", "operating_income": "ltm_operating_income", "d_and_a": "ltm_d_and_a",
+               "ebitda": "ltm_ebitda", "net_income": "ltm_net_income", "sbc": "ltm_sbc"}.get(key, key)
+    e = learn.explain_figure(key, d.get(rows[i][1]), ctx, f"{label}, {col}")
+    if col.startswith("LTM"):
+        e.here.insert(0, "LTM (last twelve months) = latest fiscal year + this year's year-to-date - last year's "
+                         "same year-to-date, so it is always a full, current year (FD-4).")
+    return e
+
+
+show(table, explain=explain_financials, key="fin", cik=t.cik)
 growth = [("Revenue growth, LTM vs prior LTM", F["revenue_growth_ltm"]),
           ("Revenue growth, last fiscal year", F["revenue_growth_fy"])]
 st.caption(md(" · ".join(f"{label}: {fmt(f)}" + (f" ({why(f)})" if why(f) else "") for label, f in growth)))
@@ -474,8 +681,13 @@ bridge = [("Share price", F["price"]), ("× Shares outstanding (cover page, FD-3
           ("− Cash and equivalents", F["cash"]), ("− Short-term investments", F["short_term_investments"]),
           ("= Enterprise value", F["enterprise_value"]), ("Net debt", F["net_debt"]),
           ("Net debt / LTM EBITDA", F["net_debt_ebitda"])]
+bridge_keys = ["price", "shares_outstanding", "equity_value", "total_debt", "preferred_stock",
+               "noncontrolling_interest", "cash", "short_term_investments", "enterprise_value", "net_debt",
+               "net_debt_ebitda"]
 show(pd.DataFrame({"value": [fmt(f) for _, f in bridge], "as of": [str(f.as_of or "") for _, f in bridge],
-                   "note": [why(f) for _, f in bridge]}, index=[l for l, _ in bridge]), wide=("note",))
+                   "note": [why(f) for _, f in bridge]}, index=[l for l, _ in bridge]), wide=("note",),
+     explain=lambda i, label, col: learn.explain_figure(bridge_keys[i], bridge[i][1], ctx, label.lstrip("×=+−- ")),
+     key="ev", cik=t.cik)
 chk = F["share_count_check"]
 st.caption(md(f"Cross-check: diluted weighted-average shares {fmt(F['diluted_shares'])} vs cover-page "
            f"{fmt(F['shares_outstanding'])} ({fmt(chk)} difference)."
@@ -520,7 +732,32 @@ else:
             line[LABELS[k]] = "" if s is None else ("n/a" if v is None else fmt(Figure("s", v, unit, "")))
         line["Status"] = f"n = {c.stats['ev_ebitda'].n} for EV/EBITDA"
         body.append(line)
-    show(pd.DataFrame(body), label=None, Company=st.column_config.TextColumn("Company", width=200, pinned=True),
+    comp_rows = [t, *c.peers]
+    by_label = {LABELS[k]: k for k in columns}
+    stat_attrs = {"25th percentile": "p25", "Median": "median", "Mean": "mean", "75th percentile": "p75"}
+
+    def explain_comps(i: int, _label, col: str):
+        key = by_label.get(col)
+        if i >= len(comp_rows):
+            stat = body[i]["Company"].removeprefix("Peers: ")
+            s_ = c.stats.get(key) if key else None
+            if s_ is None:
+                return None
+            return learn.explain_peer_stat(key, stat, getattr(s_, stat_attrs[stat]), s_, ctx, col)
+        r = comp_rows[i]
+        if r.metrics is None:
+            return learn.Explanation(r.ticker, "", f"{r.ticker} couldn't be used: {r.error}.")
+        if key is None:
+            return learn.Explanation(f"{r.name} ({r.ticker})", "", "A row of the comps table: one company's size, "
+                                     "valuation multiples and the operating numbers that explain them. Click a "
+                                     "number to see what it means.")
+        rctx = learn.Context(r.name, r.ticker, r.metrics, peer_stats=c.stats)
+        e = learn.explain_figure(key, r.get(key), rctx, f"{r.ticker}: {col}")
+        e.cik = r.cik
+        return e
+
+    show(pd.DataFrame(body), label=None, explain=explain_comps, key="comps",
+         Company=st.column_config.TextColumn("Company", width=200, pinned=True),
          Status=st.column_config.TextColumn("Status", width="large"))
     st.caption("Statistics use non-NM peer values only (FD-7); the target is excluded. "
                "NM = negative or zero denominator, a negative multiple, or above 100x (FD-6).")
@@ -565,7 +802,20 @@ else:
         })
         for point, i in (("25th pct", 0), ("median", 1), ("75th pct", 2)):
             imp_figs[f"{LABELS[key]} {point}: implied price"] = r.share_price[i]
-    show(pd.DataFrame(imp_rows), label=None, Note=st.column_config.TextColumn("Note", width="large"))
+    imp_keys = list(c.implied)
+
+    def explain_implied(i: int, _label, col: str):
+        point = {"Implied price": 0, "At peer median": 1}.get(col, 1)
+        e = learn.explain_implied(c.implied[imp_keys[i]], point, ctx, LABELS[imp_keys[i]])
+        if col == "Implied price":  # the cell is a range: explain both ends
+            hi = learn.explain_implied(c.implied[imp_keys[i]], 2, ctx, LABELS[imp_keys[i]])
+            e.title = f"Implied price range from {LABELS[imp_keys[i]]}"
+            e.value = f"{e.value} - {hi.value}"
+            e.here += hi.here[:2]
+        return e
+
+    show(pd.DataFrame(imp_rows), label=None, explain=explain_implied, key="implied", cik=t.cik,
+         Note=st.column_config.TextColumn("Note", width="large"))
 
     sources_panel("implied valuation", imp_figs, t.cik, "imp")
 
@@ -631,22 +881,43 @@ else:
     for n in dict.fromkeys(n for f in assume.values() for n in f.notes):
         st.caption(md(f"Note: {n}"))
     res = dcf_mod.run(assume, m, b, mid_year, steady_state=steady)
+    dctx = learn.DcfContext(res, assume, defaults, m, b, mid_year, steady)
+    ctx.dcf = dctx
+    if learning():
+        pick_ = st.pills("Explain an assumption", keys, key=f"dcf-explain-{t.ticker}",
+                         format_func=lambda k: dcf_mod.LABELS[k].replace("Revenue growth, year", "Growth yr"),
+                         help="Pick any box above to see what it means, where its default came from, and what "
+                              "happens to the value when it moves.")
+        if pick_:
+            e_ = learn.explain_assumption(pick_, dctx, ctx)
+            e_.feeds = learn.chain(pick_)
+            explain_card(e_, t.cik)
     if res.reason:
         st.warning(md(f"DCF not available: {res.reason}"))
     else:
         price_now = F["price"]
         up = (res.share_price.value / price_now.value - 1) if price_now.ok and res.share_price.ok else None
         tiles = st.columns(5)
-        tiles[0].metric("DCF share price", fmt(res.share_price),
-                        delta=None if up is None else f"{up:+.1%} vs current", help=res.share_price.formula)
-        tiles[1].metric("DCF enterprise value", fmt(res.enterprise_value))
-        tiles[2].metric("WACC", fmt(res.wacc), help=res.wacc.formula)
-        tiles[3].metric("Terminal value % of EV", f"{res.tv_share_of_ev:.0%}",
-                        help="Share of the value that comes from after year 5. Above ~75% means the answer "
-                             "rests mostly on the terminal assumptions.")
-        tiles[4].metric("Implied exit multiple", "n/a" if res.implied_exit_multiple is None
-                        else f"{res.implied_exit_multiple:.1f}x",
-                        help="Terminal value / year-5 EBITDA. Compare it with the peer EV/EBITDA multiples.")
+        tile(tiles[0], "DCF share price", fmt(res.share_price), learn.explain_dcf_output("dcf_price", dctx, ctx),
+             t.cik, delta=None if up is None else f"{up:+.1%} vs current", help=res.share_price.formula)
+        tile(tiles[1], "DCF enterprise value", fmt(res.enterprise_value),
+             learn.explain_dcf_output("dcf_ev", dctx, ctx), t.cik)
+        tile(tiles[2], "WACC", fmt(res.wacc), learn.explain_dcf_output("wacc", dctx, ctx), t.cik,
+             help=res.wacc.formula)
+        tile(tiles[3], "Terminal value % of EV", f"{res.tv_share_of_ev:.0%}",
+             learn.explain_dcf_output("tv_share", dctx, ctx), t.cik,
+             help="Share of the value that comes from after year 5. Above ~75% means the answer "
+                  "rests mostly on the terminal assumptions.")
+        tile(tiles[4], "Implied exit multiple", "n/a" if res.implied_exit_multiple is None
+             else f"{res.implied_exit_multiple:.1f}x", learn.explain_dcf_output("implied_exit", dctx, ctx), t.cik,
+             help="Terminal value / year-5 EBITDA. Compare it with the peer EV/EBITDA multiples.")
+
+        with st.expander(f"Step by step: how this DCF gets to {fmt(res.share_price)} per share",
+                         expanded=learning()):
+            for step in learn.walkthrough(dctx, ctx):
+                st.markdown(md(f"**{step.title}**  \n{step.text}"))
+                if step.math:
+                    st.code("\n".join(step.math), language=None, wrap_lines=True)
 
         for n in res.notes:
             st.caption(md(f"Check: {n}"))
@@ -671,7 +942,8 @@ else:
             "PV of free cash flow": [""] + [usd(y.pv) for y in res.years],
         }
         lines = {k: v + [terminal.get(k, "")] for k, v in lines.items()}
-        show(pd.DataFrame(lines, index=cols).T)
+        show(pd.DataFrame(lines, index=cols).T, explain=lambda i, label, col: learn.explain_dcf_cell(label, col, dctx, ctx),
+             key=f"dcf-proj", cik=t.cik)
         if res.terminal_fcf.formula.startswith(f"year-{dcf_mod.YEARS} NOPAT"):
             st.caption(md(f"Terminal year: {res.terminal_fcf.formula}. The perpetuity grows from this cash flow."))
 
@@ -685,7 +957,18 @@ else:
                       ("+ Short-term investments", F["short_term_investments"]),
                       ("= Equity value", res.equity_value), ("÷ Shares outstanding", F["shares_outstanding"]),
                       ("= Share price", res.share_price)]
-            show(pd.DataFrame({"value": [fmt(f) for _, f in bridge]}, index=[l for l, _ in bridge]))
+            dcf_bridge_keys = ["pv_fcf", "pv_terminal", "dcf_ev", "total_debt", "preferred_stock",
+                               "noncontrolling_interest", "cash", "short_term_investments", "dcf_equity",
+                               "shares_outstanding", "dcf_price"]
+
+            def explain_dcf_bridge(i: int, label: str, _col):
+                k_ = dcf_bridge_keys[i]
+                if k_ in learn.FIGURE_CONCEPT:
+                    return learn.explain_figure(k_, bridge[i][1], ctx, label.lstrip("=+−÷ "))
+                return learn.explain_dcf_output(k_, dctx, ctx)
+
+            show(pd.DataFrame({"value": [fmt(f) for _, f in bridge]}, index=[l for l, _ in bridge]),
+                 explain=explain_dcf_bridge, key="dcf-bridge", cik=t.cik)
         with right:
             st.markdown("**WACC**")
             ke = res.cost_of_equity
@@ -694,7 +977,24 @@ else:
                          ("Pre-tax cost of debt", assume["cost_of_debt"]), ("Tax rate", assume["tax_rate"]),
                          ("Equity value (weight)", F["equity_value"]), ("Total debt (weight)", F["total_debt"]),
                          ("= WACC", res.wacc)]
-            show(pd.DataFrame({"value": [fmt(f) for _, f in wacc_rows]}, index=[l for l, _ in wacc_rows]))
+            wacc_keys = ["risk_free", "beta", "erp", "cost_of_equity", "cost_of_debt", "tax_rate", "equity_value",
+                         "total_debt", "wacc"]
+
+            def explain_wacc(i: int, label: str, _col):
+                k_ = wacc_keys[i]
+                if k_ in assume:
+                    return learn.explain_assumption(k_, dctx, ctx)
+                if k_ in ("equity_value", "total_debt"):
+                    e_ = learn.explain_figure(k_, wacc_rows[i][1], ctx, label)
+                    E_, D_ = F["equity_value"].value or 0, F["total_debt"].value or 0
+                    if E_ + D_:
+                        e_.here.insert(0, f"Weight in WACC: {(E_ if k_ == 'equity_value' else D_) / (E_ + D_):.1%} "
+                                          "(market equity value and total debt, FD-11).")
+                    return e_
+                return learn.explain_dcf_output(k_, dctx, ctx)
+
+            show(pd.DataFrame({"value": [fmt(f) for _, f in wacc_rows]}, index=[l for l, _ in wacc_rows]),
+                 explain=explain_wacc, key="dcf-wacc", cik=t.cik)
             if res.exit_price.ok:
                 st.caption(md(
                     f"Cross-check: valuing year 5 at the peer median {b.peer_median_ev_ebitda.value:.1f}x EV/EBITDA "
@@ -707,7 +1007,27 @@ else:
         ws, gs, grid = dcf_mod.sensitivity(assume, m, b, mid_year, steady_state=steady)
         sens = pd.DataFrame([[fmt(f) for f in row] for row in grid],
                             index=[f"{w:.2%}" for w in ws], columns=[f"g {g:.2%}" for g in gs])
-        show(sens, label="WACC")
+        def explain_sens(i: int, _label, col: str):
+            e_ = learn.explain("sensitivity", None, ctx, "Sensitivity table")
+            if not col.startswith("g "):
+                return e_
+            j = list(sens.columns).index(col)
+            f_ = grid[i][j]
+            e_.title = f"Share price at WACC {ws[i]:.2%} and terminal growth {gs[j]:.2%}"
+            e_.value = fmt(f_)
+            e_.here = [f"Base case (centre cell): WACC {ws[2]:.2%}, g {gs[2]:.2%} → {fmt(grid[2][2])}."]
+            if f_.ok and grid[2][2].ok:
+                e_.here.append(f"This cell is {f_.value / grid[2][2].value - 1:+.1%} versus the base case"
+                               + (f" and {f_.value / F['price'].value - 1:+.1%} versus the current price."
+                                  if F["price"].ok else "."))
+            elif not f_.ok:
+                e_.here.append(f"n/a here: {f_.reason}.")
+            e_.here.append("Read across a row: higher terminal growth raises value. Read down a column: higher "
+                           "WACC lowers it. Both act mostly through the terminal value.")
+            return e_
+
+        show(sens, label="WACC", explain=explain_sens, key="dcf-sens")
+        impact_section(dctx, ctx)
         dcf_bar = dcf_mod.football_bar(assume, m, b, mid_year, steady_state=steady)
         dcf_export = export.DcfExport(res, assume, dcf_mod.LABELS, (ws, gs, grid), mid_year, steady)
 

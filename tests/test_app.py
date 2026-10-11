@@ -73,7 +73,7 @@ def test_full_page_renders(app):
     assert metrics["Share price"] == "$100.00" and metrics["EV/EBITDA (LTM)"] == "20.0x"
     captions = " ".join(c.value for c in app.caption)
     assert r"\$80.00 to \$130.00" in captions  # escaped, so it isn't rendered as LaTeX
-    assert len(app.get("plotly_chart")) == 2  # financials + football field
+    assert len(app.get("plotly_chart")) == 3  # financials + DCF tornado + football field
     assert "Discounted cash flow (FD-11)" in subheaders and "Football field" in subheaders
     notes = " ".join(m.value for m in app.markdown)
     assert "F: left out of the comps" in notes and "E EV/EBITDA: NM" in notes
@@ -136,3 +136,35 @@ def test_sector_screen_and_deep_dive(monkeypatch):
     assert at.radio[0].value == "Company tearsheet"
     assert at.text_input[0].value == "A" and "B C D E" in at.text_area[0].value
     assert len(at.get("download_button")) == 3 and "Talking points" in [s.value for s in at.subheader]
+
+
+def test_learn_mode_explains_clicked_cells(app):
+    app.text_input[0].set_value("T")
+    app.text_area[0].set_value("A B C D E F")
+    app.button[0].click().run()
+    assert app.toggle(key="learn").value is True
+    assert any(e.label.startswith("Step by step: how this DCF gets to") for e in app.expander)
+    clicks = {"fin": ((0, "LTM (2026-06-30)"), "Revenue, LTM (2026-06-30)"),
+              "ev": ((8, "value"), "Enterprise value"), "comps": ((0, "EV/EBITDA"), "T: EV/EBITDA"),
+              "comps2": ((7, "EV/EBITDA"), "Peers: 25th percentile EV/EBITDA"),
+              "implied": ((0, "Implied price"), "Implied price range from EV/EBITDA"),
+              "dcf-proj": ((8, "Year 3"), "Unlevered free cash flow, year 3"),
+              "dcf-bridge": ((10, "value"), "DCF share price (intrinsic value)"),
+              "dcf-wacc": ((1, "value"), "Beta"), "dcf-sens": ((1, "g 2.00%"), "Share price at WACC")}
+    for key, (cell, title) in clicks.items():
+        app.session_state[f"click-{key.rstrip('2')}"] = {"selection": {"rows": [], "columns": [], "cells": [cell]}}
+        app.run()
+        assert not app.exception, key
+        cards = [m.value for m in app.markdown if m.value.startswith("**") and " · " in m.value]
+        assert any(c.startswith(f"**{title}") for c in cards[6:]), (key, cards)  # first 6 are the tile popovers
+        if key == "dcf-proj":
+            assert any("NOPAT +" in c.value and "NWC build =" in c.value for c in app.code)
+
+
+def test_learn_mode_off_is_a_clean_page(app):
+    app.text_input[0].set_value("T")
+    app.button[0].click().run()
+    app.toggle(key="learn").set_value(False).run()
+    assert not app.exception
+    assert not any("Learn mode: click" in c.value for c in app.caption)
+    assert not [p for p in app.get("popover")]
