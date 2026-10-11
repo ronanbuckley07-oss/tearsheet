@@ -23,6 +23,7 @@ from engine.periods import Figure
 from engine.report import Report
 from engine.sector import COLUMNS, LABELS as SECTOR_LABELS, RELATIVE, UNITS as SECTOR_UNITS, Sector
 from engine.sources import fact_rows, other_sources
+from engine.thesis import PitchExtras
 
 COMP_LABELS = {"equity_value": "Market cap ($m)", "enterprise_value": "EV ($m)", "ev_revenue": "EV/Revenue",
                "ev_ebitda": "EV/EBITDA", "pe": "P/E", "revenue_growth_ltm": "Revenue growth (LTM)",
@@ -184,7 +185,8 @@ def _stat_rows(book: _Book, ws, first: int, last: int, start_row: int, cols: dic
     return r
 
 
-def report_workbook(rep: Report, dcf: DcfExport | None = None, points: list[str] | None = None) -> bytes:
+def report_workbook(rep: Report, dcf: DcfExport | None = None, points: list[str] | None = None,
+                    extras: PitchExtras | None = None) -> bytes:
     book = _Book()
     t = rep.target
     m = t.metrics
@@ -301,8 +303,70 @@ def report_workbook(rep: Report, dcf: DcfExport | None = None, points: list[str]
     if dcf is not None and not dcf.result.reason:
         _dcf_sheet(book, dcf, t, F, src)
 
+    if extras is not None:
+        _pitch_sheets(book, rep, extras, src)
+
     book.sources_sheet()
     return book.save()
+
+
+def _pitch_sheets(book: _Book, rep: Report, x: PitchExtras, src: str) -> None:
+    """Phase 4e: valuation summary, scorecard, what moves the DCF, and the FD-9 size check."""
+    t = rep.target
+    if x.valuation is not None:
+        ws = book.sheet("Valuation summary", "Implied share price by method vs current price (FD-16)", src)
+        book.header(ws, 4, ["Method", "Low", "Mid", "High", "Low vs current", "Mid vs current", "High vs current",
+                            "Note"], [36, 12, 12, 12, 15, 15, 15, 70])
+        for i, m in enumerate(x.valuation.methods, 5):
+            ws.cell(row=i, column=1, value=m.method)
+            for j, f in enumerate((m.low, m.mid, m.high, m.upside_low, m.upside_mid, m.upside_high), 2):
+                book.put(ws, i, j, f, section="Valuation summary", label=f"{m.method}: {f.name}", cik=t.cik)
+            ws.cell(row=i, column=8, value=m.reason or "")
+        r = 6 + len(x.valuation.methods)
+        for n in x.valuation.notes:
+            ws.cell(row=r, column=1, value=n)
+            r += 1
+    if x.scorecard is not None:
+        ws = book.sheet("Scorecard", f"{t.ticker} vs peers (FD-16)",
+                        "Outside the peer 25th-75th percentile = notable; rank = PERCENTRANK.INC among peers + target.")
+        book.header(ws, 4, ["Metric", t.ticker, "Peer 25th", "Peer median", "Peer 75th", "Percentile rank",
+                            "Position", "Reading", "Signal"], [26, 12, 12, 12, 12, 14, 34, 14, 10])
+        for i, sc in enumerate(x.scorecard.rows, 5):
+            unit = "ratio" if sc.column in ("revenue_growth_ltm", "ebitda_margin") else "x"
+            ws.cell(row=i, column=1, value=sc.label)
+            book.put(ws, i, 2, sc.target, unit, section="Scorecard", label=sc.label, cik=t.cik)
+            for j, v in enumerate((sc.stats.p25, sc.stats.median, sc.stats.p75), 3):
+                c = ws.cell(row=i, column=j, value="n/a" if v is None else v)
+                c.number_format = NUMBER_FORMATS[unit]
+            book.put(ws, i, 6, sc.rank)
+            for j, v in enumerate((sc.position, sc.reading, sc.signal), 7):
+                ws.cell(row=i, column=j, value=v)
+        r = 6 + len(x.scorecard.rows)
+        for n in x.scorecard.warnings:
+            ws.cell(row=r, column=1, value=n)
+            r += 1
+    if x.drivers:
+        ws = book.sheet("What moves the DCF", "DCF share price, one input moved one step at a time (FD-14)", src)
+        book.header(ws, 4, ["Input", "Step (+/-)", "Price, input lowered", "Price, input raised", "Swing ($/share)",
+                            "Note"], [34, 14, 18, 18, 16, 60])
+        for i, d in enumerate(x.drivers, 5):
+            ws.cell(row=i, column=1, value=d.label)
+            ws.cell(row=i, column=2, value=d.step)
+            ok = d.low is not None and d.high is not None
+            for j, v in ((3, d.low), (4, d.high), (5, d.swing if ok else None)):
+                c = ws.cell(row=i, column=j, value="n/a" if v is None else v)
+                c.number_format = '$#,##0.00'
+            if not ok:
+                ws.cell(row=i, column=6, value="one step breaks the DCF (WACC at or below terminal growth, or "
+                                               "negative terminal cash flow)")
+    if x.size_fits:
+        ws = book.sheet("Peer size check", f"Peer market cap / {t.ticker} market cap (FD-9 band 0.25x-4x)", src)
+        book.header(ws, 4, ["Peer", "Ticker", "Market cap multiple", "In FD-9 band"], [34, 10, 20, 14])
+        for i, f in enumerate(x.size_fits, 5):
+            ws.cell(row=i, column=1, value=f.name)
+            ws.cell(row=i, column=2, value=f.ticker)
+            book.put(ws, i, 3, f.ratio)
+            ws.cell(row=i, column=4, value={True: "yes", False: "no", None: "n/a"}[f.in_band])
 
 
 def _dcf_sheet(book: _Book, d: DcfExport, t, F, src: str) -> None:
@@ -516,20 +580,28 @@ def _style_chart(chart, legend: bool = True):
     chart.font.size = Pt(11)
 
 
-def report_deck(rep: Report, dcf: DcfExport | None = None, football: list[dict] | None = None,
-                points: list[str] | None = None) -> bytes:
-    from pptx.chart.data import CategoryChartData
-    from pptx.dml.color import RGBColor
-    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION
-    from pptx.util import Inches, Pt
+# Each slide is its own function so the company deck, the sector deck and the combined
+# pitch deck (Phase 4e) share them. Slide builders only format engine output.
+
+
+def _report_footer(rep: Report) -> str:
+    t, m = rep.target, rep.target.metrics
+    return (f"Source: SEC EDGAR XBRL filings, LTM through {m.ltm_end} (latest filing {t.latest_filing}); "
+            f"share price {m.figures['price'].formula} (Yahoo Finance). NM = not meaningful. Built with Tearsheet.")
+
+
+def _sector_footer(s: Sector) -> str:
+    rows = s.loaded
+    as_of = max((r.get("price").as_of for r in rows if r.get("price").as_of), default=None)
+    return (f"Source: SEC EDGAR XBRL filings (each company's latest 10-K/10-Q, LTM); prices from Yahoo Finance "
+            f"as of {as_of}. NM = not meaningful. Statistics exclude NM values (FD-12). Built with Tearsheet.")
+
+
+def _company_overview_slide(deck: _Deck, rep: Report, points: list[str] | None) -> None:
+    from pptx.util import Inches
 
     t = rep.target
-    m = t.metrics
-    F = m.figures
-    deck = _Deck(f"Source: SEC EDGAR XBRL filings, LTM through {m.ltm_end} (latest filing {t.latest_filing}); "
-                 f"share price {F['price'].formula} (Yahoo Finance). NM = not meaningful. Built with Tearsheet.")
-
-    # 1. Overview: key stats + talking points
+    F = t.metrics.figures
     s = deck.slide(f"{t.name} ({t.ticker})", f"{t.sic_description or ''} · Company profile · {date.today():%B %d, %Y}")
     stats = [["Market data", ""], ["Share price", _fmt(F["price"])],
              ["52-week range", f"{_fmt(t.low_52w)} - {_fmt(t.high_52w)}" if t.low_52w and t.low_52w.ok else "n/a"],
@@ -542,7 +614,15 @@ def report_deck(rep: Report, dcf: DcfExport | None = None, football: list[dict] 
     if points:
         deck.bullets(s, points[:7], Inches(5.5), Inches(1.5), Inches(7.3), Inches(5.2), size=14)
 
-    # 2. Financial summary: table + revenue/EBITDA chart
+
+def _financials_slide(deck: _Deck, rep: Report) -> None:
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION
+    from pptx.util import Inches
+
+    m = rep.target.metrics
+    F = m.figures
     s = deck.slide("Financial summary", "Last two fiscal years and LTM. EBITDA = operating income + D&A (FD-1).")
     periods = [(f"FY{e.year}", m.fiscal_years[e]) for e in sorted(m.fiscal_years)]
     periods.append((f"LTM {m.ltm_end:%b-%y}", {"revenue": F["ltm_revenue"], "operating_income": F["ltm_operating_income"],
@@ -570,212 +650,467 @@ def report_deck(rep: Report, dcf: DcfExport | None = None, football: list[dict] 
     ch.value_axis.has_major_gridlines = False
     ch.value_axis.visible = False
 
-    # 3. Comps
-    c = rep.comps
-    if c.peers:
-        s = deck.slide("Trading comparables", f"LTM multiples; peer statistics exclude the target and NM values (FD-7). "
-                                              f"{len(c.peers)} peers.")
-        head = ["Company", "Mkt cap", "EV", "EV/Rev", "EV/EBITDA", "P/E", "Rev growth", "EBITDA mgn"]
-        keys = ("equity_value", "enterprise_value", "ev_revenue", "ev_ebitda", "pe", "revenue_growth_ltm",
-                "ebitda_margin")
-        data = [head]
-        for row in c.peers:
-            if row.metrics is not None:
-                data.append([row.name[:28], *[_fmt(row.get(k)) for k in keys]])
-        stat_start = len(data)
-        for label, attr in (("Peer median", "median"), ("Peer 25th pct", "p25"), ("Peer 75th pct", "p75")):
-            line = [label, "", ""]
-            for k in keys[2:]:
-                st = c.stats.get(k)
-                v = getattr(st, attr) if st else None
-                line.append(_num(v, COMP_UNITS[k]))
-            data.append(line)
-        data.append([f"{t.name[:24]} (target)", *[_fmt(t.get(k)) for k in keys]])
-        n = len(data)
-        deck.table(s, data, Inches(0.5), Inches(1.5), Inches(12.3), Inches(min(5.2, 0.32 * n)),
-                   bold_rows={*range(stat_start, n)}, first_col_width=Inches(3.3), font=11 if n < 16 else 9)
 
-    # 4. Football field
-    bars = [b for b in (football or []) if b["low"] is not None and b["high"] is not None
-            and b["label"] != "Current price"]
-    price = F["price"].value
-    if bars:
-        s = deck.slide("Valuation summary (football field)",
-                       f"Implied share price ranges vs current price {_fmt(F['price'])}.")
-        cd = CategoryChartData()
-        labels = [b["label"] for b in reversed(bars)]
-        if price:
-            labels.append(f"Current price ({_fmt(F['price'])})")
-        cd.categories = labels
-        lows = [b["low"] for b in reversed(bars)] + ([price * 0.996] if price else [])
-        spans = [b["high"] - b["low"] for b in reversed(bars)] + ([price * 0.008] if price else [])
-        cd.add_series("base", [round(v, 2) for v in lows])
-        cd.add_series("range", [round(v, 2) for v in spans])
-        ch = s.shapes.add_chart(XL_CHART_TYPE.BAR_STACKED, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3),
-                                cd).chart
-        _style_chart(ch, legend=False)
-        ch.series[0].format.fill.background()
-        rng = ch.series[1]
-        rng.format.fill.solid()
-        rng.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
-        for i, b in enumerate(reversed(bars)):
-            pt = rng.points[i]
-            if b["label"] == "52-week range":
-                pt.format.fill.solid()
-                pt.format.fill.fore_color.rgb = RGBColor.from_string("8A8984")
-            pt.data_label.has_text_frame = True
-            pt.data_label.text_frame.text = f"${b['low']:,.0f} - ${b['high']:,.0f}"
-            pt.data_label.position = XL_LABEL_POSITION.INSIDE_BASE
-            pt.data_label.text_frame.paragraphs[0].runs[0].font.size = Pt(11)
-            pt.data_label.text_frame.paragraphs[0].runs[0].font.color.rgb = RGBColor.from_string("FFFFFF")
-        if price:
-            pt = rng.points[len(bars)]
-            pt.format.fill.solid()
-            pt.format.fill.fore_color.rgb = RGBColor.from_string(ORANGE)
-        ch.plots[0].gap_width = 60
-        ch.value_axis.has_major_gridlines = True
-        ch.value_axis.tick_labels.number_format, ch.value_axis.tick_labels.number_format_is_linked = '"$"#,##0', False
-        lo_all = min(lows)
-        ch.value_axis.minimum_scale = max(0, round(lo_all * 0.8, -1))
+def _comps_slide(deck: _Deck, rep: Report) -> None:
+    from pptx.util import Inches
 
-    # 5. DCF
-    if dcf is not None and not dcf.result.reason:
-        res = dcf.result
-        s = deck.slide("Discounted cash flow", f"Unlevered DCF, 5-year forecast, perpetuity growth terminal value "
-                                               f"(FD-11). WACC {_fmt(res.wacc)}, terminal growth "
-                                               f"{_fmt(dcf.assumptions['terminal_growth'])}.")
-        rows = [["", *[f"Year {y.n}" for y in res.years]],
-                ["Revenue", *[_num(y.revenue, "USD") for y in res.years]],
-                ["Growth", *[f"{y.growth:.1%}" for y in res.years]],
-                ["EBIT", *[_num(y.ebit, "USD") for y in res.years]],
-                ["Unlevered FCF", *[_num(y.ufcf, "USD") for y in res.years]],
-                ["PV of FCF", *[_num(y.pv, "USD") for y in res.years]]]
-        deck.table(s, rows, Inches(0.5), Inches(1.5), Inches(7.4), Inches(2.4), first_col_width=Inches(1.9), font=11)
-        out = [["Output", ""], ["Enterprise value", _fmt(res.enterprise_value)],
-               ["Equity value", _fmt(res.equity_value)], ["Share price", _fmt(res.share_price)],
-               ["vs current", f"{res.share_price.value / price - 1:+.0%}" if price and res.share_price.ok else "n/a"],
-               ["Terminal value % of EV", f"{res.tv_share_of_ev:.0%}" if res.tv_share_of_ev is not None else "n/a"]]
-        deck.table(s, out, Inches(8.4), Inches(1.5), Inches(4.4), Inches(2.4), first_col_width=Inches(2.6), font=11)
-        ws_, gs, grid = dcf.sensitivity
-        if grid:
-            sens = [["WACC \\ g", *[f"{g:.1%}" for g in gs]]] + [
-                [f"{w:.1%}", *[_fmt(f) for f in row]] for w, row in zip(ws_, grid)]
-            deck.table(s, sens, Inches(0.5), Inches(4.3), Inches(7.4), Inches(2.4), first_col_width=Inches(1.4),
-                       font=11)
-            tb = s.shapes.add_textbox(Inches(8.4), Inches(4.3), Inches(4.4), Inches(2.4)).text_frame
-            tb.word_wrap = True
-            tb.text = ("Sensitivity: share price by WACC (rows) and terminal growth (columns). History-based "
-                       "defaults; every assumption is listed in the Excel export.")
-            tb.paragraphs[0].runs[0].font.size = Pt(12)
-    return deck.save()
+    t, c = rep.target, rep.comps
+    if not c.peers:
+        return
+    s = deck.slide("Trading comparables", f"LTM multiples; peer statistics exclude the target and NM values (FD-7). "
+                                          f"{len(c.peers)} peers.")
+    head = ["Company", "Mkt cap", "EV", "EV/Rev", "EV/EBITDA", "P/E", "Rev growth", "EBITDA mgn"]
+    keys = ("equity_value", "enterprise_value", "ev_revenue", "ev_ebitda", "pe", "revenue_growth_ltm",
+            "ebitda_margin")
+    data = [head]
+    for row in c.peers:
+        if row.metrics is not None:
+            data.append([row.name[:28], *[_fmt(row.get(k)) for k in keys]])
+    stat_start = len(data)
+    for label, attr in (("Peer median", "median"), ("Peer 25th pct", "p25"), ("Peer 75th pct", "p75")):
+        line = [label, "", ""]
+        for k in keys[2:]:
+            st = c.stats.get(k)
+            v = getattr(st, attr) if st else None
+            line.append(_num(v, COMP_UNITS[k]))
+        data.append(line)
+    data.append([f"{t.name[:24]} (target)", *[_fmt(t.get(k)) for k in keys]])
+    n = len(data)
+    deck.table(s, data, Inches(0.5), Inches(1.5), Inches(12.3), Inches(min(5.2, 0.32 * n)),
+               bold_rows={*range(stat_start, n)}, first_col_width=Inches(3.3), font=11 if n < 16 else 9)
 
 
-def sector_deck(s: Sector, points: list[str] | None = None) -> bytes:
-    from pptx.chart.data import CategoryChartData, XyChartData
+def _football_slide(deck: _Deck, rep: Report, football: list[dict] | None) -> None:
+    from pptx.chart.data import CategoryChartData
     from pptx.dml.color import RGBColor
     from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION
     from pptx.util import Inches, Pt
 
-    from engine.sector import fit
+    F = rep.target.metrics.figures
+    bars = [b for b in (football or []) if b["low"] is not None and b["high"] is not None
+            and b["label"] != "Current price"]
+    price = F["price"].value
+    if not bars:
+        return
+    s = deck.slide("Valuation summary (football field)",
+                   f"Implied share price ranges vs current price {_fmt(F['price'])}.")
+    cd = CategoryChartData()
+    labels = [b["label"] for b in reversed(bars)]
+    if price:
+        labels.append(f"Current price ({_fmt(F['price'])})")
+    cd.categories = labels
+    lows = [b["low"] for b in reversed(bars)] + ([price * 0.996] if price else [])
+    spans = [b["high"] - b["low"] for b in reversed(bars)] + ([price * 0.008] if price else [])
+    cd.add_series("base", [round(v, 2) for v in lows])
+    cd.add_series("range", [round(v, 2) for v in spans])
+    ch = s.shapes.add_chart(XL_CHART_TYPE.BAR_STACKED, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3),
+                            cd).chart
+    _style_chart(ch, legend=False)
+    ch.series[0].format.fill.background()
+    rng = ch.series[1]
+    rng.format.fill.solid()
+    rng.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
+    for i, b in enumerate(reversed(bars)):
+        pt = rng.points[i]
+        if b["label"] == "52-week range":
+            pt.format.fill.solid()
+            pt.format.fill.fore_color.rgb = RGBColor.from_string("8A8984")
+        pt.data_label.has_text_frame = True
+        pt.data_label.text_frame.text = f"${b['low']:,.0f} - ${b['high']:,.0f}"
+        pt.data_label.position = XL_LABEL_POSITION.INSIDE_BASE
+        pt.data_label.text_frame.paragraphs[0].runs[0].font.size = Pt(11)
+        pt.data_label.text_frame.paragraphs[0].runs[0].font.color.rgb = RGBColor.from_string("FFFFFF")
+    if price:
+        pt = rng.points[len(bars)]
+        pt.format.fill.solid()
+        pt.format.fill.fore_color.rgb = RGBColor.from_string(ORANGE)
+    ch.plots[0].gap_width = 60
+    ch.value_axis.has_major_gridlines = True
+    ch.value_axis.tick_labels.number_format, ch.value_axis.tick_labels.number_format_is_linked = '"$"#,##0', False
+    lo_all = min(lows)
+    ch.value_axis.minimum_scale = max(0, round(lo_all * 0.8, -1))
 
-    rows = s.loaded
-    as_of = max((r.get("price").as_of for r in rows if r.get("price").as_of), default=None)
-    deck = _Deck(f"Source: SEC EDGAR XBRL filings (each company's latest 10-K/10-Q, LTM); prices from Yahoo Finance "
-                 f"as of {as_of}. NM = not meaningful. Statistics exclude NM values (FD-12). Built with Tearsheet.")
 
-    # 1. Overview
-    sl = deck.slide(f"{s.name}: sector overview", f"{len(rows)} companies · {date.today():%B %d, %Y}")
+def _dcf_slide(deck: _Deck, rep: Report, dcf: DcfExport | None) -> None:
+    from pptx.util import Inches, Pt
+
+    if dcf is None or dcf.result.reason:
+        return
+    price = rep.target.metrics.figures["price"].value
+    res = dcf.result
+    s = deck.slide("Discounted cash flow", f"Unlevered DCF, 5-year forecast, perpetuity growth terminal value "
+                                           f"(FD-11). WACC {_fmt(res.wacc)}, terminal growth "
+                                           f"{_fmt(dcf.assumptions['terminal_growth'])}.")
+    rows = [["", *[f"Year {y.n}" for y in res.years]],
+            ["Revenue", *[_num(y.revenue, "USD") for y in res.years]],
+            ["Growth", *[f"{y.growth:.1%}" for y in res.years]],
+            ["EBIT", *[_num(y.ebit, "USD") for y in res.years]],
+            ["Unlevered FCF", *[_num(y.ufcf, "USD") for y in res.years]],
+            ["PV of FCF", *[_num(y.pv, "USD") for y in res.years]]]
+    deck.table(s, rows, Inches(0.5), Inches(1.5), Inches(7.4), Inches(2.4), first_col_width=Inches(1.9), font=11)
+    out = [["Output", ""], ["Enterprise value", _fmt(res.enterprise_value)],
+           ["Equity value", _fmt(res.equity_value)], ["Share price", _fmt(res.share_price)],
+           ["vs current", f"{res.share_price.value / price - 1:+.0%}" if price and res.share_price.ok else "n/a"],
+           ["Terminal value % of EV", f"{res.tv_share_of_ev:.0%}" if res.tv_share_of_ev is not None else "n/a"]]
+    deck.table(s, out, Inches(8.4), Inches(1.5), Inches(4.4), Inches(2.4), first_col_width=Inches(2.6), font=11)
+    ws_, gs, grid = dcf.sensitivity
+    if grid:
+        sens = [["WACC \\ g", *[f"{g:.1%}" for g in gs]]] + [
+            [f"{w:.1%}", *[_fmt(f) for f in row]] for w, row in zip(ws_, grid)]
+        deck.table(s, sens, Inches(0.5), Inches(4.3), Inches(7.4), Inches(2.4), first_col_width=Inches(1.4),
+                   font=11)
+        tb = s.shapes.add_textbox(Inches(8.4), Inches(4.3), Inches(4.4), Inches(2.4)).text_frame
+        tb.word_wrap = True
+        tb.text = ("Sensitivity: share price by WACC (rows) and terminal growth (columns). History-based "
+                   "defaults; every assumption is listed in the Excel export.")
+        tb.paragraphs[0].runs[0].font.size = Pt(12)
+
+
+def report_deck(rep: Report, dcf: DcfExport | None = None, football: list[dict] | None = None,
+                points: list[str] | None = None) -> bytes:
+    deck = _Deck(_report_footer(rep))
+    _company_overview_slide(deck, rep, points)
+    _financials_slide(deck, rep)
+    _comps_slide(deck, rep)
+    _football_slide(deck, rep, football)
+    _dcf_slide(deck, rep, dcf)
+    return deck.save()
+
+
+# ---- sector slides ----------------------------------------------------------------------------
+
+
+def _sector_overview_slide(deck: _Deck, s: Sector, points: list[str] | None) -> None:
+    from pptx.util import Inches
+
+    sl = deck.slide(f"{s.name}: sector overview", f"{len(s.loaded)} companies · {date.today():%B %d, %Y}")
     if points:
         deck.bullets(sl, points, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3), size=16)
 
-    # 2. Benchmarking table
-    sl = deck.slide(f"{s.name}: trading comparables", "LTM figures; sorted by market cap.")
+
+def _sector_table_slide(deck: _Deck, s: Sector, highlight: str | None = None) -> None:
+    from pptx.util import Inches
+
+    rows = s.loaded
+    sl = deck.slide(f"{s.name}: trading comparables",
+                    "LTM figures; sorted by market cap." + (f" {highlight} in bold." if highlight else ""))
     keys = ("equity_value", "enterprise_value", "revenue_growth_ltm", "ebitda_margin", "ev_revenue", "ev_ebitda", "pe")
     head = ["Company", "Mkt cap", "EV", "Rev growth", "EBITDA mgn", "EV/Rev", "EV/EBITDA", "P/E"]
     ordered = sorted(rows, key=lambda r: r.get("equity_value").value or 0, reverse=True)
-    data = [head] + [[r.name[:28], *[_fmt(r.get(k)) for k in keys]] for r in ordered]
+    data = [head] + [[r.name[:28] + (" (target)" if r.ticker == highlight else ""), *[_fmt(r.get(k)) for k in keys]]
+                     for r in ordered]
+    bold = {i for i, r in enumerate(ordered, 1) if r.ticker == highlight}
     stat_start = len(data)
     for label, attr in (("Median", "median"), ("25th percentile", "p25"), ("75th percentile", "p75")):
         data.append([label, *[_num(getattr(s.stats[k], attr), SECTOR_UNITS[k]) for k in keys]])
     n = len(data)
     deck.table(sl, data, Inches(0.5), Inches(1.5), Inches(12.3), Inches(min(5.3, 0.3 * n)),
-               bold_rows=set(range(stat_start, n)), first_col_width=Inches(3.3), font=11 if n < 16 else 9)
+               bold_rows=set(range(stat_start, n)) | bold, first_col_width=Inches(3.3), font=11 if n < 16 else 9)
 
-    # 3. Ranked EV/EBITDA and EV/Revenue
-    for key in ("ev_ebitda", "ev_revenue"):
-        ranked = s.rank(key)
-        if not ranked:
-            continue
-        st = s.stats[key]
-        sl = deck.slide(f"{s.name}: LTM {SECTOR_LABELS[key]}",
-                        f"Sector median {_num(st.median, 'x')} shown in orange. Left out as NM or n/a: "
-                        + (", ".join(t for t, _ in st.excluded) or "none") + ".")
-        cd = CategoryChartData()
-        cd.categories = [t for t, _ in ranked] + ["Median"]
-        cd.add_series(SECTOR_LABELS[key], [round(v, 2) for _, v in ranked] + [round(st.median, 2)])
-        ch = sl.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5), Inches(1.5), Inches(12.3),
-                                 Inches(5.3), cd).chart
-        _style_chart(ch, legend=False)
-        ser = ch.series[0]
-        ser.format.fill.solid()
-        ser.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
-        pt = ser.points[len(ranked)]
-        pt.format.fill.solid()
-        pt.format.fill.fore_color.rgb = RGBColor.from_string(ORANGE)
-        plot = ch.plots[0]
-        plot.gap_width = 50
-        plot.has_data_labels = True
-        plot.data_labels.number_format, plot.data_labels.number_format_is_linked = '0.0"x"', False
-        plot.data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
-        ch.value_axis.visible = False
-        ch.value_axis.has_major_gridlines = False
 
-    # 4. Scatter: EV/Revenue vs growth with the fitted line
+def _sector_rank_slide(deck: _Deck, s: Sector, key: str, highlight: str | None = None) -> None:
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION
+    from pptx.util import Inches
+
+    ranked = s.rank(key)
+    if not ranked:
+        return
+    st = s.stats[key]
+    sl = deck.slide(f"{s.name}: LTM {SECTOR_LABELS[key]}",
+                    f"Sector median {_num(st.median, 'x')} shown in orange. Left out as NM or n/a: "
+                    + (", ".join(t for t, _ in st.excluded) or "none") + ".")
+    cd = CategoryChartData()
+    cd.categories = [t for t, _ in ranked] + ["Median"]
+    cd.add_series(SECTOR_LABELS[key], [round(v, 2) for _, v in ranked] + [round(st.median, 2)])
+    ch = sl.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5), Inches(1.5), Inches(12.3),
+                             Inches(5.3), cd).chart
+    _style_chart(ch, legend=False)
+    ser = ch.series[0]
+    ser.format.fill.solid()
+    ser.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
+    pt = ser.points[len(ranked)]
+    pt.format.fill.solid()
+    pt.format.fill.fore_color.rgb = RGBColor.from_string(ORANGE)
+    for i, (tk, _) in enumerate(ranked):
+        if tk == highlight:
+            p = ser.points[i]
+            p.format.fill.solid()
+            p.format.fill.fore_color.rgb = RGBColor.from_string(NAVY)
+    plot = ch.plots[0]
+    plot.gap_width = 50
+    plot.has_data_labels = True
+    plot.data_labels.number_format, plot.data_labels.number_format_is_linked = '0.0"x"', False
+    plot.data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
+    ch.value_axis.visible = False
+    ch.value_axis.has_major_gridlines = False
+
+
+def _sector_scatter_slide(deck: _Deck, s: Sector, highlight: str | None = None) -> None:
+    from pptx.chart.data import XyChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_MARKER_STYLE
+    from pptx.util import Inches, Pt
+
+    from engine.sector import WEAK_FIT_R2, fit
+
+    rows = s.loaded
     f = fit(rows, "revenue_growth_ltm", "ev_revenue")
     pts = [(r.ticker, r.get("revenue_growth_ltm").value, r.get("ev_revenue").value) for r in rows
            if r.get("revenue_growth_ltm").ok and r.get("ev_revenue").ok]
-    if len(pts) >= 3:
-        sub = (f"Least-squares line: EV/Revenue = {f.intercept:.1f}x + {f.slope:.1f}x × growth, R² = {f.r2:.2f}, "
-               f"n = {f.n}." if f.r2 is not None else "Too few points for a fitted line.")
-        sl = deck.slide(f"{s.name}: valuation vs growth", sub)
-        cd = XyChartData()
-        ser = cd.add_series("Companies")
-        for _, x, y in pts:
-            ser.add_data_point(round(x, 4), round(y, 2))
-        if f.slope is not None:
-            xs = [min(p[1] for p in pts), max(p[1] for p in pts)]
-            line = cd.add_series("Fit")
-            for x in xs:
-                line.add_data_point(round(x, 4), round(f.predict(x), 2))
-        ch = sl.shapes.add_chart(XL_CHART_TYPE.XY_SCATTER, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3),
-                                 cd).chart
-        _style_chart(ch, legend=False)
-        dots = ch.series[0]
-        dots.format.line.fill.background()
-        dots.marker.style = 8  # circle
-        dots.marker.size = 10
-        dots.marker.format.fill.solid()
-        dots.marker.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
-        for i, (tk, _, _) in enumerate(pts):
-            dl = dots.points[i].data_label
-            dl.has_text_frame = True
-            dl.text_frame.text = tk
-            dl.position = XL_LABEL_POSITION.RIGHT
-            dl.text_frame.paragraphs[0].runs[0].font.size = Pt(10)
-        if f.slope is not None:
-            fl = ch.series[1]
-            fl.format.line.color.rgb = RGBColor.from_string(ORANGE)
-            fl.format.line.dash_style = 4
-            fl.smooth = False
-            from pptx.enum.chart import XL_MARKER_STYLE
-            fl.marker.style = XL_MARKER_STYLE.NONE
-        ch.category_axis.tick_labels.number_format = "0%"
-        ch.category_axis.tick_labels.number_format_is_linked = False
-        ch.category_axis.has_title = True
-        ch.category_axis.axis_title.text_frame.text = "LTM revenue growth"
-        ch.value_axis.tick_labels.number_format = '0.0"x"'
-        ch.value_axis.tick_labels.number_format_is_linked = False
-        ch.value_axis.has_title = True
-        ch.value_axis.axis_title.text_frame.text = "EV / LTM revenue"
-        ch.value_axis.has_major_gridlines = True
+    if len(pts) < 3:
+        return
+    sub = (f"Least-squares line: EV/Revenue = {f.intercept:.1f}x + {f.slope:.1f}x × growth, R² = {f.r2:.2f}, "
+           f"n = {f.n}." if f.r2 is not None else "Too few points for a fitted line.")
+    if f.r2 is not None and f.r2 < WEAK_FIT_R2:
+        sub += " Weak fit: growth explains little of the valuation spread here."
+    sl = deck.slide(f"{s.name}: valuation vs growth", sub)
+    cd = XyChartData()
+    ser = cd.add_series("Companies")
+    for _, x, y in pts:
+        ser.add_data_point(round(x, 4), round(y, 2))
+    if f.slope is not None:
+        xs = [min(p[1] for p in pts), max(p[1] for p in pts)]
+        line = cd.add_series("Fit")
+        for x in xs:
+            line.add_data_point(round(x, 4), round(f.predict(x), 2))
+    ch = sl.shapes.add_chart(XL_CHART_TYPE.XY_SCATTER, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3),
+                             cd).chart
+    _style_chart(ch, legend=False)
+    dots = ch.series[0]
+    dots.format.line.fill.background()
+    dots.marker.style = 8  # circle
+    dots.marker.size = 10
+    dots.marker.format.fill.solid()
+    dots.marker.format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
+    for i, (tk, _, _) in enumerate(pts):
+        dl = dots.points[i].data_label
+        dl.has_text_frame = True
+        dl.text_frame.text = tk
+        dl.position = XL_LABEL_POSITION.RIGHT
+        dl.text_frame.paragraphs[0].runs[0].font.size = Pt(10)
+        if tk == highlight:
+            mk = dots.points[i].marker
+            mk.style, mk.size = 8, 14
+            mk.format.fill.solid()
+            mk.format.fill.fore_color.rgb = RGBColor.from_string(ORANGE)
+            dl.text_frame.paragraphs[0].runs[0].font.bold = True
+    if f.slope is not None:
+        fl = ch.series[1]
+        fl.format.line.color.rgb = RGBColor.from_string(ORANGE)
+        fl.format.line.dash_style = 4
+        fl.smooth = False
+        fl.marker.style = XL_MARKER_STYLE.NONE
+    ch.category_axis.tick_labels.number_format = "0%"
+    ch.category_axis.tick_labels.number_format_is_linked = False
+    ch.category_axis.has_title = True
+    ch.category_axis.axis_title.text_frame.text = "LTM revenue growth"
+    ch.value_axis.tick_labels.number_format = '0.0"x"'
+    ch.value_axis.tick_labels.number_format_is_linked = False
+    ch.value_axis.has_title = True
+    ch.value_axis.axis_title.text_frame.text = "EV / LTM revenue"
+    ch.value_axis.has_major_gridlines = True
+
+
+def sector_deck(s: Sector, points: list[str] | None = None) -> bytes:
+    deck = _Deck(_sector_footer(s))
+    _sector_overview_slide(deck, s, points)
+    _sector_table_slide(deck, s)
+    for key in ("ev_ebitda", "ev_revenue"):
+        _sector_rank_slide(deck, s, key)
+    _sector_scatter_slide(deck, s)
+    return deck.save()
+
+
+# ---- pitch deck (Phase 4e): sector -> target -> valuation, in the order judges expect ------------
+
+
+def _pct(f: Figure | None) -> str:
+    if f is None or f.value is None:
+        return "n/a" if f is None or not f.nm else "NM"
+    return f"{f.value:+.0%}"
+
+
+def _title_slide(deck: _Deck, rep: Report, sector_name: str | None) -> None:
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    t = rep.target
+    F = t.metrics.figures
+    s = deck.slide(f"{t.name} ({t.ticker})",
+                   " · ".join(x for x in (sector_name, t.sic_description, f"{date.today():%B %d, %Y}") if x))
+    tf = s.shapes.add_textbox(Inches(0.5), Inches(2.0), Inches(12.3), Inches(3.5)).text_frame
+    tf.word_wrap = True
+    lines = [("Recommendation: [LONG / SHORT], price target $[ ]  (team to fill in)", 28, True, NAVY),
+             (f"Current price {_fmt(F['price'])} (as of {F['price'].as_of}) · market cap {_fmt(F['equity_value'])}"
+              f" · EV {_fmt(F['enterprise_value'])}", 18, False, GRAY_TXT),
+             (f"LTM through {t.metrics.ltm_end}: revenue {_fmt(F['ltm_revenue'])}, EBITDA margin "
+              f"{_fmt(F['ebitda_margin'])}, EV/EBITDA {_fmt(F['ev_ebitda'])}", 18, False, GRAY_TXT)]
+    for i, (text, size, bold, color) in enumerate(lines):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = text
+        p.runs[0].font.size, p.runs[0].font.bold = Pt(size), bold
+        p.runs[0].font.color.rgb = RGBColor.from_string(color)
+        p.space_after = Pt(14)
+
+
+def _summary_slide(deck: _Deck, rep: Report, extras: PitchExtras) -> None:
+    from pptx.util import Inches
+
+    v = extras.valuation
+    if v is None:
+        return
+    s = deck.slide("Valuation at a glance", f"Implied share price by method vs the current {_fmt(v.price)}; "
+                                            "upside = implied price / current price - 1 (FD-16).")
+    data = [["Method", "Low", "Mid", "High", "vs current (low / mid / high)"]]
+    for mth in v.methods:
+        data.append([mth.method, _fmt(mth.low), _fmt(mth.mid), _fmt(mth.high),
+                     f"{_pct(mth.upside_low)} / {_pct(mth.upside_mid)} / {_pct(mth.upside_high)}"])
+    deck.table(s, data, Inches(0.5), Inches(1.5), Inches(12.3), Inches(0.4 * len(data)),
+               first_col_width=Inches(4.2), font=12)
+    notes = list(v.notes)
+    sc = extras.scorecard
+    if sc is not None:
+        tally = sc.tally()
+        if tally["long"]:
+            notes.append("Supports a long (vs peers): " + ", ".join(tally["long"]) + ".")
+        if tally["short"]:
+            notes.append("Supports a short (vs peers): " + ", ".join(tally["short"]) + ".")
+        notes.extend(sc.warnings)
+    notes.append("Thesis (team to write): 2-3 reasons the market misprices this stock, each tied to a number above.")
+    top = 1.7 + 0.4 * len(data)
+    deck.bullets(s, notes, Inches(0.5), Inches(top), Inches(12.3), Inches(6.8 - top), size=13)
+
+
+def _scorecard_slide(deck: _Deck, rep: Report, extras: PitchExtras) -> None:
+    from pptx.util import Inches
+
+    sc = extras.scorecard
+    if sc is None or not sc.rows:
+        return
+    s = deck.slide(f"{rep.target.ticker} vs peers: scorecard",
+                   "Outside the peer 25th-75th percentile = notable; inside = in line (FD-16). "
+                   "Rank = share of peers below the target.")
+    data = [["Metric", rep.target.ticker, "Peer 25th", "Peer median", "Peer 75th", "Rank", "Reading", "Signal"]]
+    for r in sc.rows:
+        u = "ratio" if r.column in ("revenue_growth_ltm", "ebitda_margin") else "x"
+        data.append([r.label, _fmt(r.target), _num(r.stats.p25, u), _num(r.stats.median, u), _num(r.stats.p75, u),
+                     "n/a" if r.rank.value is None else f"{r.rank.value:.0%}", r.reading, r.signal])
+    deck.table(s, data, Inches(0.5), Inches(1.5), Inches(12.3), Inches(0.42 * len(data)),
+               first_col_width=Inches(2.8), font=12)
+    lines = list(sc.warnings)
+    fits = extras.size_fits or []
+    out = [f"{f.ticker} ({f.ratio.value:.1f}x)" for f in fits if f.in_band is False]
+    if out:
+        lines.append("Peers outside the FD-9 size band (0.25x-4x the target's market cap): " + ", ".join(out) + ".")
+    if lines:
+        top = 1.7 + 0.42 * len(data)
+        deck.bullets(s, lines, Inches(0.5), Inches(top), Inches(12.3), Inches(6.8 - top), size=12)
+
+
+def _drivers_slide(deck: _Deck, rep: Report, drivers: list | None) -> None:
+    """The tearsheet's "what moves the value" tornado (engine/learn.py, FD-14 steps) as a slide."""
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches
+
+    usable = [d for d in (drivers or []) if d.low is not None and d.high is not None]
+    if not usable:
+        return
+    s = deck.slide("What moves the DCF",
+                   "Share price with one input moved one step down and up, everything else held at the base case "
+                   "(FD-14 steps: 1 point for % inputs, 0.10 for beta, 0.5 point for terminal growth).")
+    data = [["Input", "Step", "Price, input lowered", "Price, input raised", "Swing"]]
+    for d in usable:
+        data.append([d.label, d.step, _num(d.low, "USD/share"), _num(d.high, "USD/share"), f"${d.swing:,.2f}"])
+    deck.table(s, data, Inches(0.5), Inches(1.5), Inches(6.4), Inches(min(5.2, 0.4 * len(data))),
+               first_col_width=Inches(2.6), font=10 if len(data) > 9 else 11)
+    cd = CategoryChartData()
+    ordered = list(reversed(usable))
+    cd.categories = [d.label for d in ordered]
+    cd.add_series("base", [round(min(d.low, d.high), 2) for d in ordered])
+    cd.add_series("swing", [round(d.swing, 2) for d in ordered])
+    ch = s.shapes.add_chart(XL_CHART_TYPE.BAR_STACKED, Inches(7.2), Inches(1.5), Inches(5.6), Inches(5.2), cd).chart
+    _style_chart(ch, legend=False)
+    ch.series[0].format.fill.background()
+    ch.series[1].format.fill.solid()
+    ch.series[1].format.fill.fore_color.rgb = RGBColor.from_string(BLUE)
+    ch.plots[0].gap_width = 50
+    ch.value_axis.tick_labels.number_format, ch.value_axis.tick_labels.number_format_is_linked = '"$"#,##0', False
+    lo = min(min(d.low, d.high) for d in usable)
+    ch.value_axis.minimum_scale = max(0, round(lo * 0.8, -1))
+    broken = [d.label for d in (drivers or []) if d not in usable]
+    if broken:
+        deck.bullets(s, ["One step breaks the DCF (WACC at or below terminal growth, or negative terminal cash "
+                         "flow) for: " + ", ".join(broken) + "."], Inches(0.5), Inches(6.2), Inches(6.4),
+                     Inches(0.6), size=10)
+
+
+METHODOLOGY = (
+    "LTM = latest fiscal year + current year-to-date - prior year-to-date, from 10-K/10-Q XBRL (FD-4).",
+    "EBITDA = reported operating income + D&A from the cash flow statement; stock comp not added back (FD-1).",
+    "EV = market cap + debt incl. finance leases + preferred + noncontrolling interest - cash - "
+    "short-term investments; operating leases excluded (FD-2). Shares: cover page (FD-3).",
+    "Multiples with a negative or zero denominator, or above 100x, are NM and left out of statistics (FD-6).",
+    "Comps range: peer 25th-75th percentile (Excel QUARTILE.INC) x target LTM metric, bridged back to "
+    "price (FD-7, FD-8).",
+    "DCF: 5-year unlevered FCF, perpetuity terminal value, WACC from CAPM; defaults from 3 years of "
+    "history, every assumption editable (FD-11).",
+    "No forward estimates: consensus forecasts aren't free, so every multiple is backward-looking (FD-4).",
+)
+
+
+def _appendix_slide(deck: _Deck, rep: Report, extras: PitchExtras) -> None:
+    from pptx.util import Inches
+
+    s = deck.slide("Appendix: methodology and data notes",
+                   "Every figure traces to an SEC filing; the Excel export's Sources sheet lists each one.")
+    lines = list(METHODOLOGY)
+    flags = []
+    for f in rep.target.metrics.figures.values():
+        for n in f.all_notes():
+            if n not in flags:
+                flags.append(n)
+    if flags:
+        lines.append(f"{rep.target.ticker} data flags ({len(flags)}): " + "; ".join(flags[:3])
+                     + (" ..." if len(flags) > 3 else ""))
+    deck.bullets(s, lines, Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.3), size=13)
+
+
+def pitch_deck(rep: Report, sector: Sector | None = None, dcf: DcfExport | None = None,
+               football: list[dict] | None = None, extras: PitchExtras | None = None,
+               sector_points: list[str] | None = None, company_points: list[str] | None = None) -> bytes:
+    """One deck for a stock pitch, in the order judges expect:
+
+    title and recommendation placeholder -> valuation at a glance -> sector context
+    (overview, comps table, valuation vs growth) -> company (profile, financials,
+    scorecard vs peers) -> valuation (comps, DCF, drivers, football field) -> appendix
+    (methodology, sector rankings). Slides whose inputs are missing are skipped.
+    """
+    extras = extras or PitchExtras()
+    footer = _report_footer(rep)
+    deck = _Deck(footer)
+    tk = rep.target.ticker
+    _title_slide(deck, rep, sector.name if sector else None)
+    _summary_slide(deck, rep, extras)
+    if sector is not None and sector.loaded:
+        deck.footer = _sector_footer(sector)
+        _sector_overview_slide(deck, sector, sector_points)
+        _sector_table_slide(deck, sector, highlight=tk)
+        _sector_scatter_slide(deck, sector, highlight=tk)
+        deck.footer = footer
+    _company_overview_slide(deck, rep, company_points)
+    _financials_slide(deck, rep)
+    _scorecard_slide(deck, rep, extras)
+    _comps_slide(deck, rep)
+    _dcf_slide(deck, rep, dcf)
+    _drivers_slide(deck, rep, extras.drivers)
+    _football_slide(deck, rep, football)
+    _appendix_slide(deck, rep, extras)
+    if sector is not None and sector.loaded:
+        deck.footer = _sector_footer(sector)
+        for key in ("ev_ebitda", "ev_revenue"):
+            _sector_rank_slide(deck, sector, key, highlight=tk)
     return deck.save()
