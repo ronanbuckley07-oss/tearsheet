@@ -15,7 +15,7 @@ from engine import comps, dcf, market, metrics, sector
 from engine.comps import CompanyRow
 from engine.periods import Figure
 from engine.sec_client import SECClient, SECError
-from engine.tickers import TickerNotFound, get_metadata, load_ticker_map, lookup, normalize_ticker
+from engine.tickers import Company, TickerNotFound, get_metadata, load_ticker_map, lookup, normalize_ticker
 from engine.xbrl import get_series
 
 
@@ -27,11 +27,12 @@ class Report:
 
 
 def load_company(ticker: str, client: SECClient,
-                 get_quote: Callable[[str], market.Quote] = market.get_quote) -> CompanyRow:
+                 get_quote: Callable[[str], market.Quote] = market.get_quote,
+                 ticker_map: dict[str, Company] | None = None) -> CompanyRow:
     """Fetch and compute one company. Never raises for bad input: the row carries the reason."""
     t = normalize_ticker(ticker)
     try:
-        company = lookup(t, client)
+        company = lookup(t, client, ticker_map)
     except TickerNotFound:
         return CompanyRow(t, t, None, error="not in the SEC ticker list")
     try:
@@ -59,17 +60,24 @@ def load_company(ticker: str, client: SECClient,
 MAX_WORKERS = 8
 
 
-def load_companies(tickers: list[str], client: SECClient,
-                   get_quote: Callable[[str], market.Quote] = market.get_quote) -> list[CompanyRow]:
-    """load_company for each ticker, in parallel, in the order given."""
-    if len(tickers) <= 1:
-        return [load_company(t, client, get_quote) for t in tickers]
+def _ticker_map(client: SECClient) -> dict[str, Company] | None:
     try:
-        load_ticker_map(client)  # download the shared ticker list once, before the threads ask for it
+        return load_ticker_map(client)
     except SECError:
-        pass  # each company will report the failure itself
+        return None  # each company will report the failure itself
+
+
+def load_companies(tickers: list[str], client: SECClient,
+                   get_quote: Callable[[str], market.Quote] = market.get_quote,
+                   ticker_map: dict[str, Company] | None = None) -> list[CompanyRow]:
+    """load_company for each ticker, in parallel, in the order given."""
+    # Download and parse the shared ticker list once, before the threads ask for it
+    # (profiled 2026-10-10: re-parsing it per company cost ~1s of a warm 12-company screen).
+    tmap = ticker_map if ticker_map is not None else _ticker_map(client)
+    if len(tickers) <= 1:
+        return [load_company(t, client, get_quote, tmap) for t in tickers]
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(tickers))) as pool:
-        return list(pool.map(lambda t: load_company(t, client, get_quote), tickers))
+        return list(pool.map(lambda t: load_company(t, client, get_quote, tmap), tickers))
 
 
 def build_sector(name: str, tickers: list[str], client: SECClient | None = None,
@@ -86,11 +94,21 @@ def build_report(target: str, peers: list[str], client: SECClient | None = None,
                  get_risk_free: Callable[[], Figure] = market.get_risk_free,
                  get_beta: Callable[[str], Figure] = market.get_beta) -> Report:
     client = client or SECClient()
-    t, *rows = load_companies([target, *(p for p in peers if p.strip())], client, get_quote)
+    tmap = _ticker_map(client)
+    # The Treasury yield and the beta don't depend on the filings, so they download
+    # while the companies load instead of after them; only for a ticker the SEC knows,
+    # so a typo doesn't cost two market requests.
+    known = tmap is not None and normalize_ticker(target) in tmap
+    with ThreadPoolExecutor(max_workers=2) as side:
+        rf_job = side.submit(get_risk_free) if known else None
+        beta_job = side.submit(get_beta, normalize_ticker(target)) if known else None
+        t, *rows = load_companies([target, *(p for p in peers if p.strip())], client, get_quote, tmap)
+        rf = rf_job.result() if rf_job else None
+        beta = beta_job.result() if beta_job else None
     c = comps.build(t, rows)
     base = None
     if t.metrics is not None:
-        base = dcf.build_base(t.series, t.metrics, get_risk_free(), get_beta(t.ticker))
+        base = dcf.build_base(t.series, t.metrics, rf, beta)
         s = c.stats.get("ev_ebitda")
         if s is not None and s.median is not None:
             base.peer_median_ev_ebitda = Figure(

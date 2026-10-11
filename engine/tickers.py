@@ -95,9 +95,11 @@ def load_ticker_map(client: SECClient) -> dict[str, Company]:
     return out
 
 
-def lookup(ticker: str, client: SECClient) -> Company:
+def lookup(ticker: str, client: SECClient, ticker_map: dict[str, Company] | None = None) -> Company:
+    """``ticker_map``: an already-parsed load_ticker_map result. A batch of lookups
+    passes one in, so the ~1MB ticker file is parsed once rather than per company."""
     t = normalize_ticker(ticker)
-    company = load_ticker_map(client).get(t)
+    company = (ticker_map if ticker_map is not None else load_ticker_map(client)).get(t)
     if company is None:
         raise TickerNotFound(f"{ticker!r} is not in the SEC ticker list")
     return company
