@@ -141,3 +141,92 @@ def build(name: str, rows: list[CompanyRow]) -> Sector:
         if r.metrics is None:
             notes.append(f"{r.ticker}: left out, {r.error}")
     return s
+
+
+# ---- Phase 4e: screening tools (FD-12, added 2026-10-10) -------------------------------------
+
+WEAK_FIT_R2 = 0.2  # below this the line explains little; residuals are shown but not argued from
+
+
+def percent_rank(values: list[float], x: float) -> float | None:
+    """Share of the other values below x: Excel PERCENTRANK.INC (count below / (n - 1)).
+
+    0% = lowest in the group, 100% = highest; ties share the lower rank. Same
+    spreadsheet-reproducible spirit as FD-10 Q11. Needs 2+ values.
+    """
+    if len(values) < 2:
+        return None
+    return sum(1 for v in values if v < x) / (len(values) - 1)
+
+
+def ranks(s: Sector, column: str) -> dict[str, Figure]:
+    """Each company's percentile rank within the screen on one column (NM/n/a -> n/a)."""
+    vals = [r.get(column).value for r in s.loaded if r.get(column).ok]
+    out = {}
+    for r in s.loaded:
+        f = r.get(column)
+        name = f"{LABELS[column]} percentile rank"
+        if not f.ok:
+            out[r.ticker] = missing(name, "ratio", f"{LABELS[column]} {'NM' if f.nm else 'n/a'}")
+            continue
+        pr = percent_rank(vals, f.value)
+        out[r.ticker] = (missing(name, "ratio", "fewer than 2 usable values") if pr is None else
+                         Figure(name=name, value=pr, unit="ratio", inputs=(f,),
+                                formula=f"companies below {r.ticker} / ({len(vals)} usable - 1), "
+                                        "Excel PERCENTRANK.INC (FD-12)"))
+    return out
+
+
+@dataclass(frozen=True)
+class Residual:
+    """How far a company sits from the fitted line (FD-12): above = richer, below = cheaper."""
+
+    ticker: str
+    actual: float
+    fitted: float
+    gap: float  # actual - fitted, in the y unit (turns of the multiple)
+    gap_pct: float | None  # actual / fitted - 1; None when the fitted value isn't positive
+
+
+def residuals(rows: list[CompanyRow], x: str, y: str) -> tuple[Fit, list[Residual]]:
+    """Gap to the least-squares line for every company in the fit, cheapest (most negative) first.
+
+    This is a screen, not a valuation: it says which multiples look low *given* how
+    the market prices growth (or margins) across this group. With R² below 0.2 the
+    line explains little and the gaps are mostly noise (WEAK_FIT_R2).
+    """
+    f = fit(rows, x, y)
+    if f.slope is None:
+        return f, []
+    out = []
+    for r in rows:
+        if r.ticker not in f.tickers:
+            continue
+        a, pred = r.get(y).value, f.predict(r.get(x).value)
+        out.append(Residual(r.ticker, a, pred, a - pred, a / pred - 1 if pred > 0 else None))
+    out.sort(key=lambda z: z.gap)
+    return f, out
+
+
+def filter_tickers(s: Sector, bounds: dict[str, tuple[float | None, float | None]]) -> tuple[list[str], list[str]]:
+    """(kept, dropped) tickers for min/max bounds per column, in the column's own unit
+    (USD, ratio, x). A company with an NM or n/a value on a bounded column is dropped,
+    because it can't be shown to pass; the reason is in its footnotes."""
+    kept, dropped = [], []
+    for r in s.loaded:
+        ok = True
+        for col, (lo, hi) in bounds.items():
+            if lo is None and hi is None:
+                continue
+            f = r.get(col)
+            if not f.ok or (lo is not None and f.value < lo) or (hi is not None and f.value > hi):
+                ok = False
+                break
+        (kept if ok else dropped).append(r.ticker)
+    return kept, dropped
+
+
+def subset(s: Sector, tickers: list[str], name: str | None = None) -> Sector:
+    """The same screen over fewer companies, statistics recomputed (no refetch)."""
+    keep = set(tickers)
+    return build(name or s.name, [r for r in s.loaded if r.ticker in keep])

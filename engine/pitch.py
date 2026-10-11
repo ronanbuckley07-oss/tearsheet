@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from engine.comps import Comps, CompanyRow
 from engine.periods import Figure
-from engine.sector import LABELS, Sector, fit
+from engine.sector import LABELS, WEAK_FIT_R2, Sector, fit, residuals
 
 
 def _x(v: float) -> str:
@@ -108,6 +108,12 @@ def sector_points(s: Sector) -> list[str]:
         strength = "strongly" if f.r2 >= 0.5 else "loosely" if f.r2 >= 0.2 else "barely"
         out.append(f"Valuation tracks growth {strength} here: EV/Revenue vs revenue growth has R² = {f.r2:.2f} "
                    f"across {f.n} companies (each +10 points of growth ≈ {f.slope * 0.1:+.1f}x EV/Revenue).")
+    if f.r2 is not None and f.r2 >= WEAK_FIT_R2 and f.n >= 5:
+        _, res = residuals(loaded, "revenue_growth_ltm", "ev_revenue")
+        low = res[0]
+        if low.gap < 0:
+            out.append(f"Furthest below the line (cheapest for its growth): {low.ticker} at {_x(low.actual)} "
+                       f"EV/Revenue, where the line predicts {_x(low.fitted)}.")
     off = [(t, v) for t, v in s.rank("price_vs_52w_high", descending=False)]
     if off:
         t, v = off[0]
