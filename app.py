@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine import dcf as dcf_mod
-from engine import export, market, pitch
+from engine import dcf_workbook, export, market, pitch
 from engine import report as report_mod
 from engine import sector as sector_mod
 from engine.comps import CONTEXT, MULTIPLES, VALUATION_BASES
@@ -761,9 +761,19 @@ if points:
         for p in points:
             st.markdown(md(f"- {p}"))
 with dl_box:
-    d1, d2, _ = st.columns([1, 1, 3])
+    d1, d2, d3, _ = st.columns([1, 1, 1.2, 1.8])
     downloads(d1, d2, f"tearsheet-{t.ticker}", lambda: export.report_workbook(rep, dcf_export, points),
               lambda: export.report_deck(rep, dcf_export, bars, points))
+    if dcf_export is not None:
+        try:
+            d3.download_button("Download DCF model", dcf_workbook.dcf_workbook(rep, dcf_export),
+                               file_name=f"DCF-{t.ticker}.xlsx", width="stretch", type="primary",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               help="Full banker-style DCF in Excel on the assumptions below: live formulas (blue "
+                                    "inputs, black formulas), WACC build, perpetuity and exit-multiple values, "
+                                    "sensitivity tables and a Sources sheet. Ties to this page's numbers.")
+        except Exception as exc:  # an export bug must never take the page down
+            d3.caption(f"DCF model export failed: {type(exc).__name__}: {exc}")
 
 # ---- every flag in one place -----------------------------------------------------------------
 

@@ -135,4 +135,4 @@ def test_sector_screen_and_deep_dive(monkeypatch):
     assert not at.exception
     assert at.radio[0].value == "Company tearsheet"
     assert at.text_input[0].value == "A" and "B C D E" in at.text_area[0].value
-    assert len(at.get("download_button")) == 2 and "Talking points" in [s.value for s in at.subheader]
+    assert len(at.get("download_button")) == 3 and "Talking points" in [s.value for s in at.subheader]

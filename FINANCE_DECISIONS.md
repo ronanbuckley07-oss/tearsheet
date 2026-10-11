@@ -159,3 +159,19 @@ Decided by Claude 2026-10-10 (owner's delegation). Implemented in engine/sector.
 - Starter sector lists (engine/presets.py) are a starting point for FD-9, not a peer selection. Banks, insurers and REITs are left out because EV/EBITDA doesn't describe them.
 
 Why it matters: a pitch starts with the sector. Lining up who trades where, and against what growth and margins, is how you find a stock that looks mispriced and how you defend the peer set you then use for its comps.
+
+---
+
+FD-13. DCF model workbook (Excel)
+
+Decided by Claude 2026-10-11 (owner's delegation). Implemented in engine/dcf_workbook.py; downloaded with "Download DCF model" once the DCF has run.
+
+- Same model as FD-11, written as Excel formulas. Every projection, discounting, terminal-value, bridge and sensitivity cell is a formula on the Inputs sheet, so changing a blue input reflows the file. On the app's assumptions it reproduces the app's share price, EV, WACC and every sensitivity cell exactly (tests/test_dcf_workbook.py recalculates it in LibreOffice and compares); a Checks block on the DCF sheet shows the tie-out.
+- Colour code (banking convention): blue = typed input or filing figure, black = formula, green = link to another sheet; yellow fill = assumptions meant to be changed.
+- Beta. Raw regression beta and the 0.67 Blume weight are separate inputs, with adjusted beta as a formula. If the user typed a beta in the app, that value is typed into the adjusted-beta cell instead.
+- Terminal value by both methods side by side. Perpetuity growth exactly as FD-11. Exit multiple: peer median EV / LTM EBITDA (FD-7) x year-5 EBITDA, discounted from the end of year 5 even when the mid-year convention is on, because an exit value is realised at a point in time (the standard banking treatment, and what the app's cross-check already did). Each method shows its implied counterpart (implied exit multiple, implied perpetual growth).
+- No peer median. The exit multiple starts at the multiple the perpetuity method implies (so both methods agree) and is labelled as such; it is never filled from a guess.
+- Sensitivities. Share price by WACC x terminal growth (+/-1% in 0.5% steps, as FD-11) and by WACC x exit multiple (+/-2.0x in 1.0x steps), plus upside vs the current price. Steps are inputs.
+- Football field on the Cover. DCF bars use the sensitivity corners (WACC +/-1%, g +/-0.5%, as FD-11; exit +/-1.0x); comps bars are the FD-8 25th-75th percentile ranges and the 52-week range, as values from the app.
+
+Why it matters: a DCF you can present has to survive "what if growth is lower?" in the room. A live model lets you change one blue cell and show the answer, and the colour code tells the reader which numbers are judgment and which are arithmetic.
