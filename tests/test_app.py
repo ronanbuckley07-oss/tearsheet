@@ -64,7 +64,7 @@ def test_empty_page_asks_for_ticker(app):
 def test_full_page_renders(app):
     app.text_input[0].set_value("T")
     app.text_area[0].set_value("A B C D E F")
-    app.button[0].click().run()
+    button(app, "Build tearsheet").click().run()
     assert not app.exception
     subheaders = [s.value for s in app.subheader]
     for name in ("Financial summary", "Enterprise value bridge", "Trading comps", "Implied valuation (FD-8)"):
@@ -77,12 +77,20 @@ def test_full_page_renders(app):
     assert "Discounted cash flow (FD-11)" in subheaders and "Football field" in subheaders
     notes = " ".join(m.value for m in app.markdown)
     assert "F: left out of the comps" in notes and "E EV/EBITDA: NM" in notes
-    assert len([e for e in app.expander if e.label.startswith("Sources")]) == 6
+    assert len([e for e in app.expander if e.label.startswith("Sources")]) == 7  # + thesis support
+    # Phase 4e: thesis support and the pitch deck download
+    assert "Thesis support" in subheaders
+    assert any("vs its peers" in m.value for m in app.markdown)
+    assert any("Valuation at a glance" in m.value for m in app.markdown)
+    labels = [b.label for b in app.get("download_button")]
+    assert labels == ["Download pitch deck", "Download Excel", "Download DCF model", "Download tearsheet slides"]
+    check = next(e for e in app.expander if e.label.startswith("Peer set check (FD-9)"))
+    assert "5 of 5 peers" in check.label  # F failed to load: not counted
 
 
 def test_dcf_responds_to_edits(app):
     app.text_input[0].set_value("T")
-    app.button[0].click().run()
+    button(app, "Build tearsheet").click().run()
     price = {m.label: m.value for m in app.metric}["DCF share price"]
     margin = next(n for n in app.number_input if n.label == "EBIT margin (%)")
     assert margin.value == 17.5  # 3-year total EBIT / revenue from history_base()
@@ -103,7 +111,7 @@ def test_missing_target_shows_error(monkeypatch):
     at = AppTest.from_file(APP, default_timeout=30)
     at.run()
     at.text_input[0].set_value("ZZZZ")
-    at.button[0].click().run()
+    button(at, "Build tearsheet").click().run()
     assert "not in the SEC ticker list" in at.error[0].value
 
 
@@ -125,17 +133,27 @@ def test_sector_screen_and_deep_dive(monkeypatch):
     assert any("Choose a sector list" in i.value for i in at.info)
     at.selectbox[0].set_value("Semiconductors").run()
     assert "NVDA" in at.text_area[0].value
-    at.button[0].click().run()
+    button(at, "Build sector screen").click().run()
     assert not at.exception
     assert "Talking points" in [s.value for s in at.subheader]
     assert len(at.get("plotly_chart")) == 2  # scatter + ranking
     assert len(at.get("download_button")) == 2
-    deep = next(b for b in at.button if b.label.startswith("Open A as a full tearsheet"))
+    assert "Pitch builder" in [s.value for s in at.subheader]
+    # percentile-rank view and filters re-slice the loaded screen without refetching
+    next(r for r in at.radio if "Values" in r.options).set_value("Percentile rank within the screen").run()
+    assert not at.exception
+    next(n for n in at.number_input if n.label.startswith("Min LTM revenue growth")).set_value(12.0).run()
+    assert not at.exception
+    assert any("Filtered out: A, C" in c.value for c in at.caption)
+    assert at.header[0].value.endswith("(filtered): 3 companies")
+    next(n for n in at.number_input if n.label.startswith("Min LTM revenue growth")).set_value(None).run()
+    next(s for s in at.selectbox if s.label == "Company to pitch").set_value("A").run()
+    deep = button(at, "Open A with the whole screen as peers")
     deep.click().run()
     assert not at.exception
     assert at.radio[0].value == "Company tearsheet"
     assert at.text_input[0].value == "A" and "B C D E" in at.text_area[0].value
-    assert len(at.get("download_button")) == 3 and "Talking points" in [s.value for s in at.subheader]
+    assert len(at.get("download_button")) == 4 and "Talking points" in [s.value for s in at.subheader]
 
 
 def test_learn_mode_explains_clicked_cells(app):
@@ -210,3 +228,63 @@ def test_deep_learn_mode_has_tabs_with_hidden_answers(app):
         for s in sections:
             for n, (q, _) in enumerate(s.questions, 1):
                 assert f"Q{n}. {q}" in labels  # every tab has its questions, answers inside a closed expander
+
+
+def button(at, label):
+    return next(b for b in at.button if b.label.startswith(label))
+
+
+def test_size_band_peers_and_trim(monkeypatch):
+    """Pitch builder opens with FD-9 size-band peers; the peer check trims an out-of-band peer."""
+    from tests.test_sector import screen
+
+    def sized_report(target, peers, **_):
+        rep = fake_report(target, [])
+        big = company("BIG", 9, **{**EXTRA, "equity_value": fig("equity value", 10_000.0)})
+        rows = [company(p, 10, **EXTRA) for p in peers if p != "BIG"] + ([big] if "BIG" in peers else [])
+        rep.comps = comps.build(rep.target, rows)
+        return rep
+
+    def sized_sector(name, tickers, **_):
+        s = screen()
+        s.loaded[1].metrics.figures["equity_value"] = fig("equity value", 10_000.0)  # B is 10x the others
+        return sector.build(name, s.loaded)
+
+    from engine import sector
+    monkeypatch.setattr("engine.report.build_report", sized_report)
+    monkeypatch.setattr("engine.report.build_sector", sized_sector)
+    st.cache_data.clear()
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.radio[0].set_value("Sector screen").run()
+    at.selectbox[0].set_value("Semiconductors").run()
+    button(at, "Build sector screen").click().run()
+    button(at, "Open A with the 3 size-band peers").click().run()
+    assert not at.exception
+    assert at.text_area[0].value == "C D E"  # B (10x A's market cap) left out
+    at.text_area[0].set_value("C D BIG")
+    button(at, "Build tearsheet").click().run()
+    trim = button(at, "Keep only the 2 peers in the size band")
+    trim.click().run()
+    assert not at.exception and at.text_area[0].value == "C D"
+
+
+def test_sic_peer_suggestions(monkeypatch):
+    from engine.peers import Candidate, CandidateList, Revenue
+
+    def fake_sic(ticker, client, limit=12):
+        rev = Revenue(500.0, "Revenues", date(2025, 1, 1), date(2025, 12, 31), "0000000001-26-000001")
+        return CandidateList("3674", "Semiconductors", 2025, None,
+                             [Candidate("PQR", 2, "PQR Corp", rev, 1.25, True)], ["1 of 1 within the band"])
+    monkeypatch.setattr("engine.report.build_report", fake_report)
+    monkeypatch.setattr("engine.peers.sic_candidates", fake_sic)
+    monkeypatch.setattr("engine.sec_client.SECClient.__init__", lambda self, *a, **k: None)
+    st.cache_data.clear()
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+    at.text_input[0].set_value("T")
+    button(at, "Build tearsheet").click().run()
+    button(at, "Suggest peers from T's SEC industry code").click().run()
+    assert not at.exception
+    assert at.text_area[0].value == "PQR"
+    assert any(e.label.startswith("SIC peer suggestions") for e in at.expander)

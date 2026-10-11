@@ -12,13 +12,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine import dcf as dcf_mod
-from engine import dcf_workbook, export, interview, learn, market, pitch
+from engine import dcf_workbook, export, interview, learn, market, pitch, thesis
+from engine import peers as peers_mod
 from engine import report as report_mod
 from engine import sector as sector_mod
 from engine.comps import CONTEXT, MULTIPLES, VALUATION_BASES
 from engine.periods import Figure, missing
 from engine.presets import SECTORS, sector_of
-from engine.sec_client import SECConfigError
+from engine.sec_client import SECClient, SECConfigError, SECError
 from engine.sources import fact_rows, formula_tree, other_sources
 
 st.set_page_config(page_title="Tearsheet", layout="wide")
@@ -291,6 +292,17 @@ def load_sector(name: str, tickers: tuple[str, ...]):
     return report_mod.build_sector(name, list(tickers), get_quote=quote)
 
 
+# SEC industry-code lookups (engine/peers.py, FD-15). Cached for a day, like SEC responses on disk.
+@st.cache_data(ttl=86400, show_spinner=False)
+def sic_peers(ticker: str):
+    return peers_mod.sic_candidates(ticker, SECClient(), limit=12)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def sic_list(code_or_ticker: str):
+    return peers_mod.sic_sector(code_or_ticker, SECClient(), limit=12)
+
+
 def parse_peers(text: str) -> list[str]:
     seen = []
     for t in text.replace(",", " ").split():
@@ -323,10 +335,13 @@ if learning() and mode != LEARN:
 
 
 def open_tearsheet(ticker: str, tickers: list[str]) -> None:
-    """Sector screen -> company tearsheet, with the rest of the screen as the peer list."""
+    """Sector screen -> company tearsheet with the given peers; the screen goes into the pitch deck."""
     st.session_state["mode"] = COMPANY
     st.session_state["target"] = ticker
     st.session_state["peers_text"] = " ".join(t for t in tickers if t != ticker)
+    if "screen_source" in st.session_state:
+        st.session_state["pitch_screen"] = (*st.session_state["screen_source"],
+                                            st.session_state.get("screen_kept", ()))
 
 
 def fill_sector_tickers() -> None:
@@ -335,17 +350,39 @@ def fill_sector_tickers() -> None:
         st.session_state["sector_text"] = " ".join(SECTORS[name])
 
 
-def downloads(col_xlsx, col_pptx, name: str, xlsx: callable, pptx: callable) -> None:
-    """Excel and PowerPoint download buttons; files are built only when this runs."""
+def fill_from_sic() -> None:
+    """Sector list from an SEC industry code (or a ticker's code), FD-15."""
+    code = (st.session_state.get("sic_code") or "").strip()
+    if not code:
+        return
     try:
-        col_xlsx.download_button("Download Excel", xlsx(), file_name=f"{name}.xlsx", width="stretch",
-                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                 help="Numbers as numbers ($m), summary rows as Excel formulas, and a Sources sheet.")
-        col_pptx.download_button("Download PowerPoint", pptx(), file_name=f"{name}.pptx", width="stretch",
-                                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                 help="16:9 slides with editable tables and charts, ready to restyle in your template.")
-    except Exception as exc:  # an export bug must never take the page down
-        col_xlsx.caption(f"Export failed: {type(exc).__name__}: {exc}")
+        res = sic_list(code.upper())
+    except (SECError, SECConfigError) as exc:
+        st.session_state["sic_result"] = f"SEC lookup failed: {exc}"
+        return
+    st.session_state["sic_result"] = res
+    if res.tickers:
+        st.session_state["sector_text"] = " ".join(res.tickers)
+        st.session_state["sector_preset"] = "Custom"
+
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def downloads(buttons: list[tuple]) -> None:
+    """Download buttons, one per (column, label, build function, file name, mime, help).
+
+    Files are built only when a button is clicked (Streamlit's deferred download data),
+    not on every rerun: building all three exports took ~0.65s, and every DCF edit reruns the page.
+    """
+    for col, label, build, file_name, mime, help_ in buttons:
+        def safe(build=build):
+            try:
+                return build()
+            except Exception as exc:  # an export bug must never take the page down
+                return f"Export failed: {type(exc).__name__}: {exc}".encode()
+        col.download_button(label, safe, file_name=file_name, mime=mime, width="stretch", help=help_)
 
 
 def pct_or_none(f: Figure, scale: float = 1.0):
@@ -359,6 +396,26 @@ def render_sector() -> None:
                  on_change=fill_sector_tickers,
                  help="Starter lists of US 10-K filers. Banks, insurers and REITs are left out: EV/EBITDA "
                       "doesn't describe them.")
+    with st.expander("Sector not listed? Build a list from an SEC industry (SIC) code"):
+        c1, c2 = st.columns([1, 3])
+        c1.text_input("SIC code or a ticker", key="sic_code", placeholder="e.g. 4213 or KNX")
+        c1.button("Find companies", on_click=fill_from_sic, key="sic_go")
+        c2.caption("Lists the largest US-listed 10-K filers the SEC files under that industry code, sized by "
+                   "calendar-year revenue from the SEC's XBRL frames (FD-15). A ticker means \"that company's "
+                   "code\". SIC codes group companies by product, not business model (Qualcomm is \"radio & TV "
+                   "equipment\"), so edit the list before you build the screen (FD-9).")
+        res = st.session_state.get("sic_result")
+        if isinstance(res, str):
+            st.error(res)
+        elif res is not None:
+            if res.candidates:
+                st.dataframe(pd.DataFrame([{
+                    "Ticker": c.ticker, "Company": c.name, "CY revenue ($bn)": c.revenue.value / 1e9,
+                    "Period end": str(c.revenue.end), "Revenue tag": c.revenue.tag, "Accession": c.revenue.accession,
+                } for c in res.candidates]), hide_index=True, width="stretch",
+                    column_config={"CY revenue ($bn)": st.column_config.NumberColumn(format="$%,.1f")})
+            for n in res.notes:
+                st.caption(md(n))
     with st.form("sector"):
         text = st.text_area("Tickers (spaces or commas)", key="sector_text", height=68,
                             placeholder="e.g. NVDA AMD AVGO QCOM TXN")
@@ -382,13 +439,39 @@ def render_sector() -> None:
     if not rows:
         st.error("None of those tickers loaded. " + " ".join(sec.notes))
         st.stop()
+    st.session_state["screen_source"] = (name, tuple(tickers))  # carried into the pitch deck
+
+    # Filters only re-slice what already loaded: statistics are recomputed, nothing is refetched.
+    with st.expander("Filter the screen (size, growth, margin)"):
+        f1, f2, f3, f4 = st.columns(4)
+        cap_lo = f1.number_input("Min market cap ($bn)", value=None, min_value=0.0, step=5.0, key="flt_cap_lo")
+        cap_hi = f2.number_input("Max market cap ($bn)", value=None, min_value=0.0, step=50.0, key="flt_cap_hi")
+        g_lo = f3.number_input("Min LTM revenue growth (%)", value=None, step=5.0, key="flt_g_lo")
+        m_lo = f4.number_input("Min LTM EBITDA margin (%)", value=None, step=5.0, key="flt_m_lo")
+        st.caption("Statistics, charts, talking points and downloads recompute over the companies that pass. A "
+                   "company whose value is NM or n/a on a filtered column is left out, since it can't be shown to pass.")
+    bounds = {"equity_value": (None if cap_lo is None else cap_lo * 1e9, None if cap_hi is None else cap_hi * 1e9),
+              "revenue_growth_ltm": (None if g_lo is None else g_lo / 100, None),
+              "ebitda_margin": (None if m_lo is None else m_lo / 100, None)}
+    kept, dropped = sector_mod.filter_tickers(sec, bounds)
+    if dropped and kept:
+        sec = sector_mod.subset(sec, kept, f"{sec.name} (filtered)")
+        rows = sec.loaded
+    elif dropped:
+        st.warning("No company passes those filters; showing the whole screen.")
+        kept, dropped = [r.ticker for r in rows], []
+    st.session_state["screen_kept"] = tuple(kept)
 
     st.header(f"{sec.name}: {len(rows)} companies")
+    if dropped:
+        st.caption("Filtered out: " + ", ".join(dropped) + ".")
     dl1, dl2, _ = st.columns([1, 1, 3])
     points = pitch.sector_points(sec)
     slug = sec.name.lower().replace(" ", "-").replace("&", "and")
-    downloads(dl1, dl2, f"tearsheet-{slug}", lambda: export.sector_workbook(sec, points),
-              lambda: export.sector_deck(sec, points))
+    downloads([(dl1, "Download Excel", lambda: export.sector_workbook(sec, points), f"tearsheet-{slug}.xlsx", XLSX,
+                "Numbers as numbers ($m), summary rows as Excel formulas, and a Sources sheet."),
+               (dl2, "Download PowerPoint", lambda: export.sector_deck(sec, points), f"tearsheet-{slug}.pptx", PPTX,
+                "16:9 slides with editable tables and charts, ready to restyle in your template.")])
 
     if points:
         st.subheader("Talking points")
@@ -398,18 +481,24 @@ def render_sector() -> None:
 
     # Sortable table: numbers stay numbers so a column header click sorts it.
     st.subheader("Side by side")
+    as_rank = st.radio("Show", ["Values", "Percentile rank within the screen"], horizontal=True,
+                       key="sector-view", label_visibility="collapsed",
+                       help="Percentile rank: 0% = lowest value in the screen, 100% = highest "
+                            "(Excel PERCENTRANK.INC, FD-12). Useful for saying 'top quartile on margin'.") != "Values"
+    rank_of = {k: sector_mod.ranks(sec, k) for k in sector_mod.COLUMNS} if as_rank else {}
     table = []
     for r in rows:
         line = {"Company": r.name, "Ticker": r.ticker, "LTM end": str(r.metrics.ltm_end)}
         for k in sector_mod.COLUMNS:
-            f = r.get(k)
-            unit = sector_mod.UNITS[k]
+            f = rank_of[k][r.ticker] if as_rank else r.get(k)
+            unit = "ratio" if as_rank else sector_mod.UNITS[k]
             line[sector_mod.LABELS[k]] = (f.value / 1e9 if f.ok else None) if unit == "USD" else \
                 pct_or_none(f, 100) if unit == "ratio" else pct_or_none(f)
         for k in sector_mod.RELATIVE:
             line[f"{sector_mod.LABELS[k]} vs median"] = pct_or_none(sec.relative[r.ticker][k], 100)
         table.append(line)
-    for label, attr in (("Median", "median"), ("25th percentile", "p25"), ("75th percentile", "p75")):
+    for label, attr in () if as_rank else (("Median", "median"), ("25th percentile", "p25"),
+                                            ("75th percentile", "p75")):
         line = {"Company": f"Sector: {label}", "Ticker": "", "LTM end": ""}
         for k in sector_mod.COLUMNS:
             v = getattr(sec.stats[k], attr)
@@ -420,7 +509,7 @@ def render_sector() -> None:
     cfg = {"Company": st.column_config.TextColumn("Company", width=200, pinned=True)}
     for k in sector_mod.COLUMNS:
         unit, label = sector_mod.UNITS[k], sector_mod.LABELS[k]
-        fmt_ = {"USD": "$%,.1fbn", "ratio": "%.1f%%", "x": "%.1fx"}[unit]
+        fmt_ = "%.0f%%" if as_rank else {"USD": "$%,.1fbn", "ratio": "%.1f%%", "x": "%.1fx"}[unit]
         cfg[label] = st.column_config.NumberColumn(label, format=fmt_)
     for k in sector_mod.RELATIVE:
         cfg[f"{sector_mod.LABELS[k]} vs median"] = st.column_config.NumberColumn(
@@ -449,6 +538,10 @@ def render_sector() -> None:
                                      "to see what each means, or open it as a full tearsheet below.")
         e = learn.explain_figure(key, r.get(key), ctx, f"{r.ticker}: {sector_mod.LABELS[key]}")
         e.cik = r.cik
+        if as_rank and not col.endswith("vs median"):
+            rk = rank_of[key][r.ticker]
+            e.here.insert(0, f"Percentile rank in this screen: {'n/a (' + rk.reason + ')' if not rk.ok else f'{rk.value:.0%}'}"
+                             " (0% = lowest value, 100% = highest; Excel PERCENTRANK.INC, FD-12).")
         if col.endswith("vs median"):
             rel = sec.relative[r.ticker][key]
             e.title, e.value = f"{r.ticker}: {col}", "n/a" if not rel.ok else f"{rel.value:+.0%}"
@@ -497,6 +590,24 @@ def render_sector() -> None:
                        f"{sector_mod.LABELS[x].lower()}; above it, richer.")
         else:
             st.caption(f"Need at least 3 companies with both values for a fitted line ({fit.n} have them).")
+        _, gaps = sector_mod.residuals(rows, x, y)
+        if gaps:
+            with st.expander(f"Who sits furthest below the line? ({sector_mod.LABELS[y]} vs the fit)"):
+                st.dataframe(pd.DataFrame([{
+                    "Ticker": g.ticker, "Actual": g.actual, "Line predicts": g.fitted, "Gap (turns)": g.gap,
+                    "Gap %": None if g.gap_pct is None else g.gap_pct * 100} for g in gaps]),
+                    hide_index=True, width="stretch",
+                    column_config={"Actual": st.column_config.NumberColumn(format="%.1fx"),
+                                   "Line predicts": st.column_config.NumberColumn(format="%.1fx"),
+                                   "Gap (turns)": st.column_config.NumberColumn(format="%+.1fx"),
+                                   "Gap %": st.column_config.NumberColumn(format="%+.0f%%")})
+                st.caption("Gap = actual multiple - the line's prediction at that company's "
+                           f"{sector_mod.LABELS[x].lower()} (FD-12). Negative = cheaper than peers with the same "
+                           "growth or margin. A screen, not a valuation: it produces no price.")
+                if fit.r2 is not None and fit.r2 < sector_mod.WEAK_FIT_R2:
+                    st.warning(f"Weak fit (R² = {fit.r2:.2f}): the line explains little of the spread here, so "
+                               "these gaps are mostly noise. Don't build a thesis on them; one outlier "
+                               "(check the chart) can flatten the line.")
     with right:
         rankable = [k for k in sector_mod.COLUMNS if k not in ("ltm_revenue",)]
         key = st.selectbox("Rank by", rankable, index=rankable.index("ev_ebitda"), key="sector-rank",
@@ -535,11 +646,30 @@ def render_sector() -> None:
         for n in f.all_notes():
             st.markdown(md(f"- {n}"))
 
-    st.subheader("Deep dive")
+    st.subheader("Pitch builder")
+    st.caption("Pick the company you'll pitch. It opens as a full tearsheet with comps, DCF, a scorecard against "
+               "its peers and a one-click pitch deck. FD-9: peers should share the business model first, then sit "
+               "within 0.25x-4x of the target's market cap.")
     pick = st.selectbox("Company to pitch", [r.ticker for r in rows], key="sector-pick",
                         format_func=lambda t: f"{t} ({next(r.name for r in rows if r.ticker == t)})")
-    st.button(f"Open {pick} as a full tearsheet (rest of the screen as peers)", type="primary",
-              on_click=open_tearsheet, args=(pick, [r.ticker for r in rows]))
+    target_row = next(r for r in rows if r.ticker == pick)
+    fits = peers_mod.size_check(target_row, [r for r in rows if r.ticker != pick])
+    band = peers_mod.in_band(fits)
+    st.dataframe(pd.DataFrame([{
+        "Ticker": f.ticker, "Company": f.name, "Market cap vs target": f.ratio.value,
+        "In FD-9 band": {True: "yes", False: "no", None: f"n/a: {f.ratio.reason}"}[f.in_band]} for f in fits]),
+        hide_index=True, width="stretch",
+        column_config={"Market cap vs target": st.column_config.NumberColumn(format="%.2fx")})
+    b1, b2 = st.columns(2)
+    b1.button(f"Open {pick} with the {len(band)} size-band peers", type="primary", disabled=not band,
+              on_click=open_tearsheet, args=(pick, band), width="stretch",
+              help="Peers within 0.25x-4x of the target's market cap (FD-9). Recommended: a judge will ask why a "
+                   "company 30x your target's size is a comparable.")
+    b2.button(f"Open {pick} with the whole screen as peers", on_click=open_tearsheet,
+              args=(pick, [r.ticker for r in rows]), width="stretch")
+    if len(band) < 4:
+        st.caption(f"Only {len(band)} peer(s) are in the size band. FD-9 aims for 6-12; consider adding companies "
+                   "from the SIC finder above, or use the whole screen and say so.")
 
 
 def show_steps(steps: list[learn.Step]) -> None:
@@ -716,6 +846,23 @@ def fill_peers() -> None:
         st.session_state["peers_text"] = " ".join(t for t in SECTORS[name] if t != target_)
 
 
+def set_peers(tickers: list[str]) -> None:
+    st.session_state["peers_text"] = " ".join(tickers)
+
+
+def fill_peers_from_sic() -> None:
+    """Peer candidates from the target's SEC industry code, sized by revenue (FD-15)."""
+    target_ = st.session_state.get("target", "")
+    try:
+        res = sic_peers(target_)
+    except Exception as exc:  # unknown ticker, SEC down: say so, keep the page
+        st.session_state["sic_peer_result"] = f"SIC lookup for {target_} failed: {type(exc).__name__}: {exc}"
+        return
+    st.session_state["sic_peer_result"] = res
+    if res.tickers:
+        set_peers(res.tickers)
+
+
 st.selectbox("Fill peers from a sector list (optional)", ["Choose a list", *SECTORS], key="peer_preset",
              on_change=fill_peers, help="Replaces the peer box with that sector's tickers. Edit it before building.")
 
@@ -733,6 +880,28 @@ with st.form("inputs"):
 if submitted:
     st.session_state["target"] = target
     st.session_state["peers_text"] = peers_text
+
+if st.session_state.get("target"):
+    st.button(f"Suggest peers from {st.session_state['target']}'s SEC industry code", on_click=fill_peers_from_sic,
+              help="Same SIC code, US-listed 10-K filers, closest in revenue first (within 0.25x-4x where possible; "
+                   "FD-15). SIC codes don't capture business model, so prune the list before you build (FD-9).")
+sic_res = st.session_state.get("sic_peer_result")
+if sic_res is not None:
+    with st.expander("SIC peer suggestions (put in the peer box above; edit, then build)",
+                     expanded=isinstance(sic_res, str)):
+        if isinstance(sic_res, str):
+            st.error(sic_res)
+        else:
+            if sic_res.candidates:
+                st.dataframe(pd.DataFrame([{
+                    "Ticker": c.ticker, "Company": c.name, "CY revenue ($bn)": c.revenue.value / 1e9,
+                    "Revenue vs target": c.size_ratio,
+                    "In band": {True: "yes", False: "no", None: "n/a"}[c.in_band],
+                    "Accession": c.revenue.accession} for c in sic_res.candidates]), hide_index=True, width="stretch",
+                    column_config={"CY revenue ($bn)": st.column_config.NumberColumn(format="$%,.1f"),
+                                   "Revenue vs target": st.column_config.NumberColumn(format="%.2fx")})
+            for n in sic_res.notes:
+                st.caption(md(n))
 
 target = st.session_state.get("target", "")
 if not target:
@@ -928,6 +1097,22 @@ else:
         with st.expander(f"Footnotes ({len(footnotes) + len(c.notes)})"):
             for n in c.notes + footnotes:
                 st.markdown(md(f"- {n}"))
+    fits = peers_mod.size_check(t, [p for p in c.peers if p.metrics is not None])
+    band = peers_mod.in_band(fits)
+    outside = [f for f in fits if f.in_band is False]
+    with st.expander(f"Peer set check (FD-9): {len(band)} of {len(fits)} peers are 0.25x-4x {t.ticker}'s market cap",
+                     expanded=bool(outside)):
+        st.dataframe(pd.DataFrame([{
+            "Ticker": f.ticker, "Company": f.name, "Market cap vs target": f.ratio.value,
+            "In band": {True: "yes", False: "no", None: f"n/a: {f.ratio.reason}"}[f.in_band]} for f in fits]),
+            hide_index=True, width="stretch",
+            column_config={"Market cap vs target": st.column_config.NumberColumn(format="%.2fx")})
+        if outside:
+            st.caption("Much larger or smaller companies usually trade at different multiples (scale, liquidity, "
+                       "index weight), so they pull the peer median toward a different business. Similar business "
+                       "model still matters more than size (FD-9).")
+            st.button(f"Keep only the {len(band)} peers in the size band", on_click=set_peers, args=(band,),
+                      disabled=not band)
     comp_figs = {}
     for row in c.peers:
         if row.metrics is not None:
@@ -985,7 +1170,7 @@ else:
 # ---- DCF (FD-11) -------------------------------------------------------------------------------
 
 st.subheader("Discounted cash flow (FD-11)")
-dcf_bar = dcf_export = None
+dcf_bar = dcf_export = dcf_inputs = None
 b = rep.dcf_base
 if b is None:
     st.info("The DCF needs the target's filings, which didn't load.")
@@ -1043,6 +1228,7 @@ else:
 
     for n in dict.fromkeys(n for f in assume.values() for n in f.notes):
         st.caption(md(f"Note: {n}"))
+    dcf_inputs = (assume, mid_year, steady)
     res = dcf_mod.run(assume, m, b, mid_year, steady_state=steady)
     dctx = learn.DcfContext(res, assume, defaults, m, b, mid_year, steady)
     ctx.dcf = dctx
@@ -1230,6 +1416,61 @@ for b_ in bars:
     if b_ not in usable:
         st.caption(md(f"{b_['label']}: not shown ({b_['reason']})"))
 
+# ---- thesis support (FD-16): scorecard, valuation summary, peer size --------------------------
+
+extras = thesis.build_extras(rep, *(dcf_inputs or (None,)))
+st.subheader("Thesis support")
+st.caption("What a judge asks first: where does the company sit against its peers, how much upside on which "
+           "method, and why those peers. All computed from the sections above; which DCF input moves the answer "
+           "most is the \"What moves the value\" chart in the DCF section.")
+thesis_figs: dict[str, Figure] = {}
+sc = extras.scorecard
+if sc is not None:
+    st.markdown(f"**{t.ticker} vs its peers**")
+    ratio_cols = ("revenue_growth_ltm", "ebitda_margin")
+    show(pd.DataFrame([{
+        "Metric": r.label, t.ticker: fmt(r.target),
+        **{h: fmt(None if v is None else Figure("", v, "ratio" if r.column in ratio_cols else "x", ""))
+           for h, v in (("Peer 25th", r.stats.p25), ("Peer median", r.stats.median), ("Peer 75th", r.stats.p75))},
+        "Rank": "n/a" if r.rank.value is None else f"{r.rank.value:.0%}", "Position": r.position,
+        "Reading": r.reading, "Signal": r.signal} for r in sc.rows]), label=None,
+        Metric=st.column_config.TextColumn("Metric", width=200, pinned=True))
+    st.caption("Outside the peer 25th-75th percentile = notable, inside = in line. Signal: higher growth and "
+               "margin, lower leverage and lower multiples support a long; the opposite supports a short (FD-16). "
+               "Rank = share of peers below the target.")
+    for w in sc.warnings:
+        st.warning(md(w))
+    thesis_figs.update({f"Rank: {r.label}": r.rank for r in sc.rows})
+vs = extras.valuation
+if vs is not None and vs.methods:
+    st.markdown("**Valuation at a glance** (implied price vs the current price)")
+    show(pd.DataFrame([{
+        "Method": mth.method, "Low": fmt(mth.low), "Mid": fmt(mth.mid), "High": fmt(mth.high),
+        "Low vs current": fmt(mth.upside_low), "Mid vs current": fmt(mth.upside_mid),
+        "High vs current": fmt(mth.upside_high)} for mth in vs.methods]), label=None,
+        Method=st.column_config.TextColumn("Method", width=260, pinned=True))
+    for n in vs.notes:
+        st.info(md(n))
+    thesis_figs.update({f"{mth.method}: mid vs current": mth.upside_mid for mth in vs.methods})
+if thesis_figs:
+    sources_panel("thesis support", thesis_figs, t.cik, "thesis")
+
+
+def pitch_screen():
+    """The sector screen this tearsheet was opened from, for the pitch deck (None if it wasn't)."""
+    ps = st.session_state.get("pitch_screen")
+    if not ps or t.ticker not in ps[1]:
+        return None
+    name_, tickers_, kept_ = ps
+    try:
+        full = load_sector(name_, tickers_)
+    except Exception:
+        return None
+    if kept_ and len(kept_) < len(full.loaded):
+        return sector_mod.subset(full, list(kept_), f"{full.name} (filtered)")
+    return full
+
+
 # ---- talking points and exports (built from everything above) ----------------------------------
 
 points = pitch.company_points(t, c, dcf_export.result.share_price if dcf_export else None)
@@ -1241,19 +1482,33 @@ if points:
         for p in points:
             st.markdown(md(f"- {p}"))
 with dl_box:
-    d1, d2, d3, _ = st.columns([1, 1, 1.2, 1.8])
-    downloads(d1, d2, f"tearsheet-{t.ticker}", lambda: export.report_workbook(rep, dcf_export, points),
-              lambda: export.report_deck(rep, dcf_export, bars, points))
+    d1, d2, d3, d4, _ = st.columns([1.1, 1, 1.1, 1, 0.8])
+    screen = pitch_screen()
+
+    def build_pitch() -> bytes:
+        return export.pitch_deck(rep, screen, dcf_export, bars, extras,
+                                 pitch.sector_points(screen) if screen else None, points)
+
+    buttons = [
+        (d1, "Download pitch deck", build_pitch, f"pitch-{t.ticker}.pptx", PPTX,
+         "One deck in the order judges expect: title, valuation at a glance, "
+         + ("sector overview and positioning, " if screen else "")
+         + "company profile, financials, scorecard vs peers, comps, DCF and what moves it, football field, "
+           "methodology. Recommendation and thesis are left for your team to write."),
+        (d2, "Download Excel", lambda: export.report_workbook(rep, dcf_export, points, extras),
+         f"tearsheet-{t.ticker}.xlsx", XLSX,
+         "Numbers as numbers ($m), summary rows as Excel formulas, scorecard, valuation summary, what moves the "
+         "DCF, peer size check, and a Sources sheet."),
+        (d4, "Download tearsheet slides", lambda: export.report_deck(rep, dcf_export, bars, points),
+         f"tearsheet-{t.ticker}.pptx", PPTX, "The 5-slide company profile on its own."),
+    ]
     if dcf_export is not None:
-        try:
-            d3.download_button("Download DCF model", dcf_workbook.dcf_workbook(rep, dcf_export),
-                               file_name=f"DCF-{t.ticker}.xlsx", width="stretch", type="primary",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               help="Full banker-style DCF in Excel on the assumptions below: live formulas (blue "
-                                    "inputs, black formulas), WACC build, perpetuity and exit-multiple values, "
-                                    "sensitivity tables and a Sources sheet. Ties to this page's numbers.")
-        except Exception as exc:  # an export bug must never take the page down
-            d3.caption(f"DCF model export failed: {type(exc).__name__}: {exc}")
+        buttons.insert(2, (d3, "Download DCF model", lambda: dcf_workbook.dcf_workbook(rep, dcf_export),
+                           f"DCF-{t.ticker}.xlsx", XLSX,
+                           "Full banker-style DCF in Excel on the assumptions below: live formulas (blue inputs, "
+                           "black formulas), WACC build, perpetuity and exit-multiple values, sensitivity tables and "
+                           "a Sources sheet. Ties to this page's numbers."))
+    downloads(buttons)
 
 # ---- every flag in one place -----------------------------------------------------------------
 
