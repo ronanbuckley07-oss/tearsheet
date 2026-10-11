@@ -11,7 +11,7 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from engine import comps, learn
+from engine import comps, interview, learn
 from engine.comps import CompanyRow
 from engine.periods import Figure
 from engine.report import Report
@@ -194,3 +194,19 @@ def test_learn_page_walks_through_every_chapter(app):
     assert any(n.label.startswith("New value") for n in app.number_input)
     app.radio(key="mode").set_value("Company tearsheet").run()
     assert not app.exception and app.toggle(key="learn").value is False
+
+
+def test_deep_learn_mode_has_tabs_with_hidden_answers(app):
+    app.radio(key="mode").set_value("Learn").run()
+    app.text_input(key="learn_ticker").set_value("T").run()
+    assert not app.tabs  # deep mode is opt-in
+    app.toggle(key="learn_deep").set_value(True).run()
+    for i, ch in enumerate(learn.COURSE):
+        app.radio(key="learn_chapter").set_value(ch.title).run()
+        assert not app.exception, ch.title
+        sections = interview.DEEP[i]
+        assert [t.label for t in app.tabs] == ["Core idea", *[s.title for s in sections]]
+        labels = [e.label for e in app.expander]
+        for s in sections:
+            for n, (q, _) in enumerate(s.questions, 1):
+                assert f"Q{n}. {q}" in labels  # every tab has its questions, answers inside a closed expander

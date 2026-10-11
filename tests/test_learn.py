@@ -117,3 +117,13 @@ def test_cost_of_debt_shows_its_wacc_weight():
     ctx, d = ctx_and_dcf()
     e = learn.explain_assumption("cost_of_debt", d, ctx)
     assert any("20.0% of HC's capital" in h for h in e.here)
+
+
+def test_every_chapter_has_deep_tabs_and_each_tab_has_questions():
+    from engine import interview
+    assert set(interview.DEEP) == set(range(len(learn.COURSE)))
+    for sections in interview.DEEP.values():
+        assert len(sections) >= 2
+        for s in sections:
+            assert s.body and len(s.questions) >= 2, s.title
+            assert all(q.strip() and a.strip() for q, a in s.questions)

@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine import dcf as dcf_mod
-from engine import dcf_workbook, export, learn, market, pitch
+from engine import dcf_workbook, export, interview, learn, market, pitch
 from engine import report as report_mod
 from engine import sector as sector_mod
 from engine.comps import CONTEXT, MULTIPLES, VALUATION_BASES
@@ -568,6 +568,10 @@ def render_learn() -> None:
                       "No starter peer list for this ticker, so the comps chapter will be empty. Build its "
                       "tearsheet with peers first, then come back."))
 
+    deep = st.toggle("Deep learn mode (interview prep)", key="learn_deep",
+                     help="Each chapter opens into tabs that go to investment banking interview depth: the "
+                          "technical questions bankers ask, worked examples, and practice questions with hidden "
+                          "answers at the end of every tab.")
     names = [ch.title for ch in learn.COURSE] + ["Glossary: every term"]
     nav, body = st.columns([1, 3], gap="large")
     pick = nav.radio("Chapter", names, key="learn_chapter")
@@ -587,21 +591,48 @@ def render_learn() -> None:
         else:
             ch = learn.COURSE[i]
             st.subheader(ch.title)
-            for para in ch.intro:
-                st.markdown(md(para))
-            if ch.figures or ch.special:
-                learn_examples(ch, ticker, peers)
-            if ch.questions:
-                st.markdown("**Check yourself**")
-                for q, a in ch.questions:
-                    with st.expander(q):
-                        st.markdown(md(a))
+            sections = interview.DEEP.get(i, ())
+            if deep and sections:
+                n_q = len(ch.questions) + sum(len(s_.questions) for s_ in sections)
+                st.caption(f"Deep learn mode: {len(sections) + 1} tabs, {n_q} practice questions. Each tab ends "
+                           "with questions; click one to reveal the answer.")
+                tabs = st.tabs(["Core idea", *[s_.title for s_ in sections]])
+                with tabs[0]:
+                    core_chapter(ch, ticker, peers)
+                for tab, s_ in zip(tabs[1:], sections):
+                    with tab:
+                        for para in s_.body:
+                            st.markdown(md(para))
+                        quiz(s_.questions)
+            else:
+                core_chapter(ch, ticker, peers)
+                if sections:
+                    n_q = sum(len(s_.questions) for s_ in sections)
+                    st.caption(f"Preparing for interviews? Turn on Deep learn mode above for {len(sections)} more "
+                               f"in-depth tabs on this topic and {n_q} more practice questions.")
         b1, _, b2 = st.columns([1, 2, 1])
         if i > 0:
             b1.button(f"← {names[i - 1]}", on_click=go, args=(i - 1,), width="stretch", key="learn_prev")
         if i < len(names) - 1:
             b2.button(f"{names[i + 1]} →", on_click=go, args=(i + 1,), width="stretch", key="learn_next",
                       type="primary")
+
+
+def quiz(questions) -> None:
+    if not questions:
+        return
+    st.markdown("**Check your learning**")
+    for n, (q, a) in enumerate(questions, 1):
+        with st.expander(f"Q{n}. {q}"):
+            st.markdown(md(f"**Answer.** {a}"))
+
+
+def core_chapter(ch: learn.Chapter, ticker: str, peers: list[str]) -> None:
+    for para in ch.intro:
+        st.markdown(md(para))
+    if ch.figures or ch.special:
+        learn_examples(ch, ticker, peers)
+    quiz(ch.questions)
 
 
 def learn_examples(ch: learn.Chapter, ticker: str, peers: list[str]) -> None:
